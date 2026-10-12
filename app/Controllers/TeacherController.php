@@ -76,45 +76,50 @@ class TeacherController
         if ($exam === null) {
             Response::abort(404, 'Exam not found.');
         }
+        $this->render('grading', [
+            'exam' => $exam,
+            'answers' => $this->query('SELECT a.id, a.text_answer, a.points_awarded, q.question, q.points AS max_points, CONCAT(u.first_name, " ", u.last_name) AS student_name, at.id AS attempt_id FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exam_attempts at ON at.id = a.attempt_id JOIN users u ON u.id = at.student_id WHERE q.exam_id = ? AND q.type = "TEXT" ORDER BY at.submitted_at DESC', [$examId]),
+        ]);
+    }
 
-        public function manualMarks(): void
-        {
-            Auth::requireRole('TEACHER');
-            $exam = $this->manualExam((int) Request::input('id'));
-            $students = $this->query('SELECT u.id, u.first_name, u.last_name, u.email, g.id AS grade_id, g.score FROM enrollments n JOIN users u ON u.id = n.student_id LEFT JOIN grades g ON g.student_id = u.id AND g.course_id = ? AND g.type = "EXAM" AND g.reference_id = ? WHERE n.class_id = ? AND n.status = "ACTIVE" ORDER BY u.last_name, u.first_name', [$exam['course_id'], $exam['id'], $exam['class_id']]);
-            View::render('portal/exam-marks', [
-                'user' => Auth::user(),
-                'exam' => $exam,
-                'students' => $students,
-                'message' => Session::consumeFlash('success'),
-                'error' => Session::consumeFlash('error'),
-            ]);
+    public function manualMarks(): void
+    {
+        Auth::requireRole('TEACHER');
+        $exam = $this->manualExam((int) Request::input('id'));
+        $students = $this->query('SELECT u.id, u.first_name, u.last_name, u.email, g.id AS grade_id, g.score FROM enrollments n JOIN users u ON u.id = n.student_id LEFT JOIN grades g ON g.student_id = u.id AND g.course_id = ? AND g.type = "EXAM" AND g.reference_id = ? WHERE n.class_id = ? AND n.status = "ACTIVE" ORDER BY u.last_name, u.first_name', [$exam['course_id'], $exam['id'], $exam['class_id']]);
+        View::render('portal/exam-marks', [
+            'user' => Auth::user(),
+            'exam' => $exam,
+            'students' => $students,
+            'message' => Session::consumeFlash('success'),
+            'error' => Session::consumeFlash('error'),
+        ]);
+    }
+
+    public function saveManualMark(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $exam = $this->manualExam((int) Request::input('exam_id'));
+        $studentId = (int) Request::input('student_id');
+        $student = $this->query('SELECT student_id FROM enrollments WHERE class_id = ? AND student_id = ? AND status = "ACTIVE"', [$exam['class_id'], $studentId])[0] ?? null;
+        if ($student === null) {
+            Response::abort(404, 'Student not found in this exam class.');
         }
-
-        public function saveManualMark(): void
-        {
-            Auth::requireRole('TEACHER'); Csrf::validate();
-            $exam = $this->manualExam((int) Request::input('exam_id'));
-            $studentId = (int) Request::input('student_id');
-            $student = $this->query('SELECT student_id FROM enrollments WHERE class_id = ? AND student_id = ? AND status = "ACTIVE"', [$exam['class_id'], $studentId])[0] ?? null;
-            if ($student === null) {
-                Response::abort(404, 'Student not found in this exam class.');
-            }
-            $score = (float) Request::input('score', -1);
-            if ($score < 0 || $score > (float) $exam['total_points']) {
-                $this->fail('/teacher/exam/marks?id=' . $exam['id'], 'Enter a mark between 0 and the exam total.');
-            }
-            $grade = $this->query('SELECT id FROM grades WHERE student_id = ? AND course_id = ? AND type = "EXAM" AND reference_id = ? ORDER BY id DESC LIMIT 1', [$studentId, $exam['course_id'], $exam['id']])[0] ?? null;
-            if ($grade === null) {
-                $this->pdo->prepare('INSERT INTO grades (student_id, course_id, type, reference_id, score, max_score) VALUES (?, ?, "EXAM", ?, ?, ?)')->execute([$studentId, $exam['course_id'], $exam['id'], $score, $exam['total_points']]);
-            } else {
-                $this->pdo->prepare('UPDATE grades SET score = ?, max_score = ? WHERE id = ?')->execute([$score, $exam['total_points'], $grade['id']]);
-            }
-            $this->success('/teacher/exam/marks?id=' . $exam['id'], 'Manual exam mark saved.');
+        $score = (float) Request::input('score', -1);
+        if ($score < 0 || $score > (float) $exam['total_points']) {
+            $this->fail('/teacher/exam/marks?id=' . $exam['id'], 'Enter a mark between 0 and the exam total.');
         }
+        $grade = $this->query('SELECT id FROM grades WHERE student_id = ? AND course_id = ? AND type = "EXAM" AND reference_id = ? ORDER BY id DESC LIMIT 1', [$studentId, $exam['course_id'], $exam['id']])[0] ?? null;
+        if ($grade === null) {
+            $this->pdo->prepare('INSERT INTO grades (student_id, course_id, type, reference_id, score, max_score) VALUES (?, ?, "EXAM", ?, ?, ?)')->execute([$studentId, $exam['course_id'], $exam['id'], $score, $exam['total_points']]);
+        } else {
+            $this->pdo->prepare('UPDATE grades SET score = ?, max_score = ? WHERE id = ?')->execute([$score, $exam['total_points'], $grade['id']]);
+        }
+        $this->success('/teacher/exam/marks?id=' . $exam['id'], 'Manual exam mark saved.');
+    }
 
-        public function createAttendanceSession(): void
-        {
+    public function createAttendanceSession(): void
+    {
             Auth::requireRole('TEACHER'); Csrf::validate();
             $course = $this->query('SELECT id, class_id FROM courses WHERE id = ? AND class_id = ? AND teacher_id = ?', [(int) Request::input('course_id'), (int) Request::input('class_id'), Auth::id()])[0] ?? null;
             if ($course === null) {
@@ -142,10 +147,10 @@ class TeacherController
                 throw $e;
             }
             $this->success('/teacher/classes', 'Attendance session saved.');
-        }
+    }
 
-        public function updateAttendanceRecord(): void
-        {
+    public function updateAttendanceRecord(): void
+    {
             Auth::requireRole('TEACHER'); Csrf::validate();
             $record = $this->ownedAttendanceRecord((int) Request::input('record_id'));
             $status = (string) Request::input('status');
@@ -154,19 +159,14 @@ class TeacherController
             }
             $this->pdo->prepare('UPDATE attendance_records SET status = ?, comment = ? WHERE id = ?')->execute([$status, trim((string) Request::input('comment')) ?: null, $record['id']]);
             $this->success('/teacher/classes', 'Attendance record updated.');
-        }
+    }
 
-        public function removeAttendanceRecord(): void
-        {
+    public function removeAttendanceRecord(): void
+    {
             Auth::requireRole('TEACHER'); Csrf::validate();
             $record = $this->ownedAttendanceRecord((int) Request::input('record_id'));
             $this->pdo->prepare('DELETE FROM attendance_records WHERE id = ?')->execute([$record['id']]);
             $this->success('/teacher/classes', 'Attendance record removed.');
-        }
-        $this->render('grading', [
-            'exam' => $exam,
-            'answers' => $this->query('SELECT a.id, a.text_answer, a.points_awarded, q.question, q.points AS max_points, CONCAT(u.first_name, " ", u.last_name) AS student_name, at.id AS attempt_id FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exam_attempts at ON at.id = a.attempt_id JOIN users u ON u.id = at.student_id WHERE q.exam_id = ? AND q.type = "TEXT" ORDER BY at.submitted_at DESC', [$examId]),
-        ]);
     }
 
     private function calendar(): array

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\Auth;
+use App\Core\Csrf;
 use App\Core\Database;
 use App\Core\Request;
 use App\Core\Response;
@@ -196,9 +197,68 @@ class AdminController
         $this->render('class-detail', [
             'class' => $class,
             'students' => $this->query('SELECT u.id, u.first_name, u.last_name, u.email FROM enrollments e JOIN users u ON u.id = e.student_id WHERE e.class_id = ? AND e.status = "ACTIVE" ORDER BY u.last_name, u.first_name', [$id]),
-            'courses' => $this->query('SELECT c.id, c.title, c.status, s.name AS subject_name, CONCAT(u.first_name, " ", u.last_name) AS teacher_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN users u ON u.id = c.teacher_id WHERE c.class_id = ? ORDER BY c.title', [$id]),
-            'calendar' => $this->classCalendar($id),
+            'courses' => $this->query('SELECT c.id, c.title, c.status, c.start_date, c.end_date, s.name AS subject_name, CONCAT(u.first_name, " ", u.last_name) AS teacher_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN users u ON u.id = c.teacher_id WHERE c.class_id = ? ORDER BY c.title', [$id]),
+            'courseSlots' => $this->groupBy($this->query('SELECT css.* FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? ORDER BY css.weekday, css.start_time', [$id]), 'course_id'),
+            'exams' => $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id WHERE c.class_id = ? ORDER BY e.start_at', [$id]),
+            'calendarWeek' => $this->weeklyClassCalendar($id),
         ]);
+    }
+
+    public function updateCourseSchedule(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $course = $this->query('SELECT id, class_id FROM courses WHERE id = ?', [(int) Request::input('course_id')])[0] ?? null;
+        if ($course === null) {
+            Response::abort(404, 'Course not found.');
+        }
+        $startDate = $this->date('start_date');
+        $endDate = $this->date('end_date');
+        $slots = $this->weeklySlots();
+        if ($startDate === null || $endDate === null || $endDate < $startDate || $slots === []) {
+            $this->fail('/admin/classes?id=' . $course['class_id'], 'Choose a valid course period and at least one weekly slot.');
+        }
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare('UPDATE courses SET start_date = ?, end_date = ?, status = ? WHERE id = ?')->execute([$startDate, $endDate, in_array(Request::input('status'), ['DRAFT', 'PUBLISHED'], true) ? Request::input('status') : 'DRAFT', $course['id']]);
+            $this->pdo->prepare('DELETE FROM course_schedule_slots WHERE course_id = ?')->execute([$course['id']]);
+            $statement = $this->pdo->prepare('INSERT INTO course_schedule_slots (course_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)');
+            foreach ($slots as $slot) {
+                $statement->execute([$course['id'], $slot['weekday'], $slot['start_time'], $slot['end_time']]);
+            }
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        $this->success('/admin/classes?id=' . $course['class_id'], 'Course timetable updated.');
+    }
+
+    public function cancelCourse(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $course = $this->query('SELECT id, class_id FROM courses WHERE id = ?', [(int) Request::input('course_id')])[0] ?? null;
+        if ($course === null) {
+            Response::abort(404, 'Course not found.');
+        }
+        $this->pdo->prepare('UPDATE courses SET status = "ARCHIVED" WHERE id = ?')->execute([$course['id']]);
+        $this->success('/admin/classes?id=' . $course['class_id'], 'Course cancelled.');
+    }
+
+    public function updateExamSchedule(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $exam = $this->query('SELECT e.id, c.class_id FROM exams e JOIN courses c ON c.id = e.course_id WHERE e.id = ?', [(int) Request::input('exam_id')])[0] ?? null;
+        if ($exam === null) {
+            Response::abort(404, 'Exam not found.');
+        }
+        $startAt = $this->dateTime('start_at');
+        $endAt = $this->dateTime('end_at');
+        if ($startAt === null || $endAt === null || $endAt <= $startAt) {
+            $this->fail('/admin/classes?id=' . $exam['class_id'], 'Choose a valid exam start and end time.');
+        }
+        $status = in_array(Request::input('status'), ['DRAFT', 'PUBLISHED', 'CLOSED'], true) ? Request::input('status') : 'DRAFT';
+        $this->pdo->prepare('UPDATE exams SET start_at = ?, end_at = ?, status = ? WHERE id = ?')->execute([$startAt, $endAt, $status, $exam['id']]);
+        $this->success('/admin/classes?id=' . $exam['class_id'], $status === 'CLOSED' ? 'Exam cancelled.' : 'Exam schedule updated.');
     }
 
     private function subjectDetail(int $id): void
@@ -229,6 +289,70 @@ class AdminController
         return array_slice($events, 0, 12);
     }
 
+    private function weeklyClassCalendar(int $classId): array
+    {
+        $weekStart = (new \DateTimeImmutable('monday this week'))->setTime(0, 0);
+        $weekEnd = $weekStart->modify('+7 days');
+        $events = [];
+        $slots = $this->query('SELECT css.weekday, css.start_time, css.end_time, c.id AS course_id, c.title AS course_title, c.start_date, c.end_date FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? AND c.status <> "ARCHIVED"', [$classId]);
+        for ($offset = 0; $offset < 7; $offset++) {
+            $day = $weekStart->modify("+{$offset} days");
+            $date = $day->format('Y-m-d');
+            foreach ($slots as $slot) {
+                if (strtoupper($day->format('l')) === $slot['weekday'] && $date >= $slot['start_date'] && $date <= $slot['end_date']) {
+                    $events[] = ['event_type' => 'COURSE', 'event_date' => $date, 'start_time' => $slot['start_time'], 'end_time' => $slot['end_time'], 'course_title' => $slot['course_title'], 'course_id' => $slot['course_id']];
+                }
+            }
+        }
+        $exams = $this->query('SELECT e.id AS exam_id, DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title FROM exams e JOIN courses c ON c.id = e.course_id WHERE c.class_id = ? AND e.start_at >= ? AND e.start_at < ? AND e.status <> "CLOSED"', [$classId, $weekStart->format('Y-m-d H:i:s'), $weekEnd->format('Y-m-d H:i:s')]);
+        foreach ($exams as $exam) {
+            $exam['event_type'] = 'EXAM';
+            $events[] = $exam;
+        }
+        return $events;
+    }
+
+    private function date(string $key): ?string
+    {
+        $value = trim((string) Request::input($key, ''));
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        return $date !== false && $date->format('Y-m-d') === $value ? $value : null;
+    }
+
+    private function dateTime(string $key): ?string
+    {
+        $value = trim((string) Request::input($key, ''));
+        $dateTime = \DateTimeImmutable::createFromFormat('Y-m-d\TH:i', $value);
+        return $dateTime !== false && $dateTime->format('Y-m-d\TH:i') === $value ? $dateTime->format('Y-m-d H:i:s') : null;
+    }
+
+    private function weeklySlots(): array
+    {
+        $allowed = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
+        $selected = array_unique(array_filter((array) ($_POST['schedule_days'] ?? []), fn($day): bool => is_string($day) && in_array($day, $allowed, true)));
+        $starts = (array) ($_POST['schedule_start'] ?? []);
+        $ends = (array) ($_POST['schedule_end'] ?? []);
+        $slots = [];
+        foreach ($selected as $day) {
+            $start = (string) ($starts[$day] ?? '');
+            $end = (string) ($ends[$day] ?? '');
+            if (!preg_match('/^\d{2}:\d{2}$/', $start) || !preg_match('/^\d{2}:\d{2}$/', $end) || $end <= $start) {
+                return [];
+            }
+            $slots[] = ['weekday' => $day, 'start_time' => $start . ':00', 'end_time' => $end . ':00'];
+        }
+        return $slots;
+    }
+
+    private function groupBy(array $rows, string $key): array
+    {
+        $grouped = [];
+        foreach ($rows as $row) {
+            $grouped[(int) $row[$key]][] = $row;
+        }
+        return $grouped;
+    }
+
     private function render(string $section, array $data = []): void
     {
         View::render('portal/admin-area', [
@@ -249,5 +373,17 @@ class AdminController
         $statement = $this->pdo->prepare($sql);
         $statement->execute($parameters);
         return $statement->fetchAll();
+    }
+
+    private function success(string $path, string $message): never
+    {
+        Session::flash('success', $message);
+        Response::redirect($path);
+    }
+
+    private function fail(string $path, string $message): never
+    {
+        Session::flash('error', $message);
+        Response::redirect($path);
     }
 }
