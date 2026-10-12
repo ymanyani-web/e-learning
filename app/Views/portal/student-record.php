@@ -3,6 +3,11 @@
     <div><a class="muted" href="/admin#students">← Learner records</a><h1><?= h($student['first_name'] . ' ' . $student['last_name']) ?></h1><p class="muted"><?= h($student['email']) ?></p></div>
 </section>
 
+<section class="card wide">
+    <h2>Classes, exams and attendance calendar</h2>
+    <?php if (!$calendar): ?><p class="empty">No dated course, exam, or attendance activity has been recorded.</p><?php else: ?><div class="calendar-list"><?php foreach ($calendar as $event): ?><div class="calendar-event"><time><strong><?= h($event['event_date']) ?></strong><span><?= h(substr((string) $event['start_time'], 0, 5)) ?></span></time><div><span class="pill"><?= h($event['event_type']) ?></span><strong><?= h($event['course_title']) ?></strong></div></div><?php endforeach; ?></div><?php endif; ?>
+</section>
+
 <div class="grid">
     <section class="card">
         <h2>Class enrolments</h2>

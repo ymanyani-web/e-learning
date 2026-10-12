@@ -37,7 +37,7 @@ class AdminController
             ],
             'courseStatus' => $courseStatus,
             'courseStatusMaximum' => $maximum,
-            'newStudents' => $this->query('SELECT id, first_name, last_name, email, created_at FROM users WHERE role = "STUDENT" ORDER BY created_at DESC LIMIT 5'),
+            'newStudents' => $this->query('SELECT id, first_name, last_name, email, created_at FROM users WHERE role = "STUDENT" AND status = 1 ORDER BY created_at DESC LIMIT 5'),
             'upcomingExams' => $this->query('SELECT e.title, e.start_at, c.title AS course_title, cl.name AS class_name FROM exams e JOIN courses c ON c.id = e.course_id JOIN school_classes cl ON cl.id = c.class_id WHERE e.start_at IS NOT NULL AND e.start_at >= NOW() ORDER BY e.start_at LIMIT 5'),
             'unreadNotifications' => $this->query('SELECT title, message, type, created_at FROM notifications WHERE user_id = ? AND is_read = 0 ORDER BY created_at DESC LIMIT 5', [Auth::id()]),
         ]);
@@ -54,7 +54,7 @@ class AdminController
 
         $search = trim((string) Request::input('q', ''));
         $classId = (int) Request::input('class_id');
-        $conditions = ['u.role = "STUDENT"'];
+        $conditions = ['u.role = "STUDENT"', 'u.status = 1'];
         $parameters = [];
         if ($search !== '') {
             $conditions[] = '(u.first_name LIKE ? OR u.last_name LIKE ? OR u.email LIKE ?)';
@@ -130,7 +130,7 @@ class AdminController
             'students' => $this->query('SELECT id, first_name, last_name FROM users WHERE role = "STUDENT" AND status = 1 ORDER BY last_name, first_name'),
             'teachers' => $this->query('SELECT id, first_name, last_name FROM users WHERE role = "TEACHER" AND status = 1 ORDER BY last_name, first_name'),
             'subjects' => $this->query('SELECT id, name FROM subjects ORDER BY name'),
-            'enrollments' => $this->query('SELECT e.id, e.academic_year, CONCAT(u.first_name, " ", u.last_name) AS student_name, cl.name AS class_name FROM enrollments e JOIN users u ON u.id = e.student_id JOIN school_classes cl ON cl.id = e.class_id WHERE e.status = "ACTIVE" ORDER BY e.id DESC LIMIT 6'),
+            'enrollments' => $this->query('SELECT e.id, e.academic_year, CONCAT(u.first_name, " ", u.last_name) AS student_name, cl.name AS class_name FROM enrollments e JOIN users u ON u.id = e.student_id JOIN school_classes cl ON cl.id = e.class_id WHERE e.status = "ACTIVE" AND u.status = 1 ORDER BY e.id DESC LIMIT 6'),
         ]);
     }
 
@@ -158,7 +158,7 @@ class AdminController
 
     private function studentDetail(int $id): void
     {
-        $student = $this->query('SELECT id, first_name, last_name, email, created_at FROM users WHERE id = ? AND role = "STUDENT"', [$id])[0] ?? null;
+        $student = $this->query('SELECT id, first_name, last_name, email, status, created_at FROM users WHERE id = ? AND role = "STUDENT"', [$id])[0] ?? null;
         if ($student === null) {
             Response::abort(404, 'Student not found.');
         }
@@ -196,12 +196,22 @@ class AdminController
         }
         $this->render('class-detail', [
             'class' => $class,
-            'students' => $this->query('SELECT u.id, u.first_name, u.last_name, u.email FROM enrollments e JOIN users u ON u.id = e.student_id WHERE e.class_id = ? AND e.status = "ACTIVE" ORDER BY u.last_name, u.first_name', [$id]),
+            'students' => $this->query('SELECT u.id, u.first_name, u.last_name, u.email FROM enrollments e JOIN users u ON u.id = e.student_id WHERE e.class_id = ? AND e.status = "ACTIVE" AND u.status = 1 ORDER BY u.last_name, u.first_name', [$id]),
             'courses' => $this->query('SELECT c.id, c.title, c.status, c.start_date, c.end_date, s.name AS subject_name, CONCAT(u.first_name, " ", u.last_name) AS teacher_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN users u ON u.id = c.teacher_id WHERE c.class_id = ? ORDER BY c.title', [$id]),
             'courseSlots' => $this->groupBy($this->query('SELECT css.* FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? ORDER BY css.weekday, css.start_time', [$id]), 'course_id'),
             'exams' => $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id WHERE c.class_id = ? ORDER BY e.start_at', [$id]),
             'calendarWeek' => $this->weeklyClassCalendar($id),
         ]);
+    }
+
+    public function disableStudent(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $studentId = (int) Request::input('student_id');
+        $statement = $this->pdo->prepare('UPDATE users SET status = 0 WHERE id = ? AND role = "STUDENT" AND status = 1');
+        $statement->execute([$studentId]);
+        if ($statement->rowCount() !== 1) $this->fail('/admin/students', 'Only an active student account can be disabled.');
+        $this->success('/admin/students', 'Student account disabled. Historical enrolments, attendance, and grades were retained.');
     }
 
     public function updateCourseSchedule(): void
@@ -261,6 +271,30 @@ class AdminController
         $this->success('/admin/classes?id=' . $exam['class_id'], $status === 'CLOSED' ? 'Exam cancelled.' : 'Exam schedule updated.');
     }
 
+    public function moveCalendarEvent(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $classId = (int) Request::input('class_id'); $eventType = Request::input('event_type'); $eventId = (int) Request::input('event_id');
+        $occurrenceDate = $this->date('occurrence_date'); $eventDate = $this->date('event_date'); $startTime = $this->quarterHour('start_time');
+        $weekStart = (new \DateTimeImmutable('monday this week'))->setTime(0, 0); $weekEnd = $weekStart->modify('+7 days');
+        if (!in_array($eventType, ['COURSE', 'EXAM'], true) || $eventId < 1 || $occurrenceDate === null || $eventDate === null || $startTime === null || $occurrenceDate < $weekStart->format('Y-m-d') || $occurrenceDate >= $weekEnd->format('Y-m-d') || $eventDate < $weekStart->format('Y-m-d') || $eventDate >= $weekEnd->format('Y-m-d')) $this->fail('/admin/classes?id=' . $classId, 'Move the event within this week at a 15-minute time.');
+        if ($eventType === 'COURSE') {
+            $slot = $this->query('SELECT css.id, css.start_time, css.end_time FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE css.id = ? AND c.class_id = ?', [$eventId, $classId])[0] ?? null;
+            if ($slot === null) Response::abort(404, 'Course occurrence not found.');
+            $current = $this->query('SELECT start_time, end_time FROM course_schedule_overrides WHERE course_schedule_slot_id = ? AND occurrence_date = ?', [$eventId, $occurrenceDate])[0] ?? $slot;
+            $duration = strtotime('1970-01-01 ' . $current['end_time']) - strtotime('1970-01-01 ' . $current['start_time']); $endTime = date('H:i:s', strtotime('1970-01-01 ' . $startTime) + $duration);
+            if ($startTime < '08:00:00' || $endTime > '18:00:00') $this->fail('/admin/classes?id=' . $classId, 'The moved course must remain between 08:00 and 18:00.');
+            $this->pdo->prepare('INSERT INTO course_schedule_overrides (course_schedule_slot_id, occurrence_date, override_date, start_time, end_time) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE override_date = VALUES(override_date), start_time = VALUES(start_time), end_time = VALUES(end_time)')->execute([$eventId, $occurrenceDate, $eventDate, $startTime, $endTime]);
+        } else {
+            $exam = $this->query('SELECT e.id, e.start_at, e.end_at FROM exams e JOIN courses c ON c.id = e.course_id WHERE e.id = ? AND c.class_id = ?', [$eventId, $classId])[0] ?? null;
+            if ($exam === null) Response::abort(404, 'Exam occurrence not found.');
+            $duration = strtotime($exam['end_at']) - strtotime($exam['start_at']); $startAt = $eventDate . ' ' . $startTime; $endAt = date('Y-m-d H:i:s', strtotime($startAt) + $duration);
+            if ($startTime < '08:00:00' || substr($endAt, 0, 10) !== $eventDate || substr($endAt, 11) > '18:00:00') $this->fail('/admin/classes?id=' . $classId, 'The moved exam must remain between 08:00 and 18:00.');
+            $this->pdo->prepare('UPDATE exams SET start_at = ?, end_at = ? WHERE id = ?')->execute([$startAt, $endAt, $eventId]);
+        }
+        $this->success('/admin/classes?id=' . $classId, 'Calendar event moved for this week.');
+    }
+
     private function subjectDetail(int $id): void
     {
         $subject = $this->query('SELECT * FROM subjects WHERE id = ?', [$id])[0] ?? null;
@@ -275,7 +309,14 @@ class AdminController
         ]);
     }
 
-    private function studentCalendar(int $id): array { return $this->calendar('JOIN enrollments n ON n.class_id = c.class_id WHERE n.student_id = ? AND n.status = "ACTIVE"', [$id]); }
+    private function studentCalendar(int $id): array
+    {
+        $attendance = $this->query('SELECT ats.session_date AS event_date, ats.start_time, ats.end_time, c.title AS course_title, "ATTENDANCE" AS event_type FROM attendance_records ar JOIN attendance_sessions ats ON ats.id = ar.attendance_session_id JOIN courses c ON c.id = ats.course_id WHERE ar.student_id = ?', [$id]);
+        $exams = $this->query('SELECT DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title, "EXAM" AS event_type FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id WHERE n.student_id = ? AND e.start_at IS NOT NULL GROUP BY e.id', [$id]);
+        $events = array_merge($attendance, $exams);
+        usort($events, fn(array $a, array $b): int => strcmp((string) $b['event_date'], (string) $a['event_date']));
+        return array_slice($events, 0, 12);
+    }
     private function teacherCalendar(int $id): array { return $this->calendar('WHERE c.teacher_id = ?', [$id]); }
     private function classCalendar(int $id): array { return $this->calendar('WHERE c.class_id = ?', [$id]); }
     private function subjectCalendar(int $id): array { return $this->calendar('WHERE c.subject_id = ?', [$id]); }
@@ -284,32 +325,18 @@ class AdminController
     {
         $attendance = $this->query('SELECT ats.session_date AS event_date, ats.start_time, ats.end_time, c.title AS course_title, "CLASS" AS event_type FROM attendance_sessions ats JOIN courses c ON c.id = ats.course_id ' . $filter . ' ORDER BY ats.session_date DESC LIMIT 10', $parameters);
         $exams = $this->query('SELECT DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, c.title AS course_title, "EXAM" AS event_type FROM exams e JOIN courses c ON c.id = e.course_id ' . $filter . ' AND e.start_at IS NOT NULL ORDER BY e.start_at DESC LIMIT 10', $parameters);
-        $events = array_merge($attendance, $exams);
-        usort($events, fn(array $left, array $right): int => strcmp((string) $right['event_date'], (string) $left['event_date']));
-        return array_slice($events, 0, 12);
+        $events = array_merge($attendance, $exams); usort($events, fn(array $a, array $b): int => strcmp((string) $b['event_date'], (string) $a['event_date'])); return array_slice($events, 0, 12);
     }
 
     private function weeklyClassCalendar(int $classId): array
     {
-        $weekStart = (new \DateTimeImmutable('monday this week'))->setTime(0, 0);
-        $weekEnd = $weekStart->modify('+7 days');
-        $events = [];
-        $slots = $this->query('SELECT css.weekday, css.start_time, css.end_time, c.id AS course_id, c.title AS course_title, c.start_date, c.end_date FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? AND c.status <> "ARCHIVED"', [$classId]);
-        for ($offset = 0; $offset < 7; $offset++) {
-            $day = $weekStart->modify("+{$offset} days");
-            $date = $day->format('Y-m-d');
-            foreach ($slots as $slot) {
-                if (strtoupper($day->format('l')) === $slot['weekday'] && $date >= $slot['start_date'] && $date <= $slot['end_date']) {
-                    $events[] = ['event_type' => 'COURSE', 'event_date' => $date, 'start_time' => $slot['start_time'], 'end_time' => $slot['end_time'], 'course_title' => $slot['course_title'], 'course_id' => $slot['course_id']];
-                }
-            }
-        }
-        $exams = $this->query('SELECT e.id AS exam_id, DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title FROM exams e JOIN courses c ON c.id = e.course_id WHERE c.class_id = ? AND e.start_at >= ? AND e.start_at < ? AND e.status <> "CLOSED"', [$classId, $weekStart->format('Y-m-d H:i:s'), $weekEnd->format('Y-m-d H:i:s')]);
-        foreach ($exams as $exam) {
-            $exam['event_type'] = 'EXAM';
-            $events[] = $exam;
-        }
-        return $events;
+        $weekStart = (new \DateTimeImmutable('monday this week'))->setTime(0, 0); $weekEnd = $weekStart->modify('+7 days'); $events = [];
+        $slots = $this->query('SELECT css.id AS schedule_slot_id, css.weekday, css.start_time, css.end_time, c.id AS course_id, c.title AS course_title, c.start_date, c.end_date FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? AND c.status <> "ARCHIVED"', [$classId]);
+        $overrides = $this->query('SELECT cso.course_schedule_slot_id, cso.occurrence_date, cso.override_date, cso.start_time, cso.end_time FROM course_schedule_overrides cso JOIN course_schedule_slots css ON css.id = cso.course_schedule_slot_id JOIN courses c ON c.id = css.course_id WHERE c.class_id = ? AND cso.occurrence_date >= ? AND cso.occurrence_date < ?', [$classId, $weekStart->format('Y-m-d'), $weekEnd->format('Y-m-d')]);
+        $changed = []; foreach ($overrides as $o) $changed[$o['course_schedule_slot_id'] . ':' . $o['occurrence_date']] = $o;
+        for ($i = 0; $i < 7; $i++) { $day = $weekStart->modify("+{$i} days"); $date = $day->format('Y-m-d'); foreach ($slots as $slot) { $key = $slot['schedule_slot_id'] . ':' . $date; if (strtoupper($day->format('l')) === $slot['weekday'] && $date >= $slot['start_date'] && $date <= $slot['end_date'] && !isset($changed[$key])) $events[] = ['event_type'=>'COURSE','event_date'=>$date,'occurrence_date'=>$date,'start_time'=>$slot['start_time'],'end_time'=>$slot['end_time'],'course_title'=>$slot['course_title'],'course_id'=>$slot['course_id'],'schedule_slot_id'=>$slot['schedule_slot_id']]; } }
+        foreach ($overrides as $o) foreach ($slots as $slot) if ((int)$slot['schedule_slot_id'] === (int)$o['course_schedule_slot_id']) { $events[] = ['event_type'=>'COURSE','event_date'=>$o['override_date'],'occurrence_date'=>$o['occurrence_date'],'start_time'=>$o['start_time'],'end_time'=>$o['end_time'],'course_title'=>$slot['course_title'],'course_id'=>$slot['course_id'],'schedule_slot_id'=>$slot['schedule_slot_id']]; break; }
+        $exams=$this->query('SELECT e.id AS exam_id, DATE(e.start_at) AS event_date, DATE(e.start_at) AS occurrence_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title FROM exams e JOIN courses c ON c.id=e.course_id WHERE c.class_id=? AND e.start_at>=? AND e.start_at<? AND e.status<>"CLOSED"',[$classId,$weekStart->format('Y-m-d H:i:s'),$weekEnd->format('Y-m-d H:i:s')]); foreach($exams as $exam){$exam['event_type']='EXAM';$events[]=$exam;} usort($events,fn(array $a,array $b):int=>strcmp($a['event_date'].$a['start_time'],$b['event_date'].$b['start_time'])); return $events;
     }
 
     private function date(string $key): ?string
@@ -324,6 +351,13 @@ class AdminController
         $value = trim((string) Request::input($key, ''));
         $dateTime = \DateTimeImmutable::createFromFormat('Y-m-d\TH:i', $value);
         return $dateTime !== false && $dateTime->format('Y-m-d\TH:i') === $value ? $dateTime->format('Y-m-d H:i:s') : null;
+    }
+
+    private function quarterHour(string $key): ?string
+    {
+        $value = trim((string) Request::input($key, ''));
+        if (!preg_match('/^(?:0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$/', $value) || ((int) substr($value, 3, 2)) % 15 !== 0) return null;
+        return $value . ':00';
     }
 
     private function weeklySlots(): array

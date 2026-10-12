@@ -62,6 +62,8 @@ $router->post('/admin/courses', [LearningController::class, 'createCourse']);
 $router->post('/admin/courses/schedule', [AdminController::class, 'updateCourseSchedule']);
 $router->post('/admin/courses/cancel', [AdminController::class, 'cancelCourse']);
 $router->post('/admin/exams/schedule', [AdminController::class, 'updateExamSchedule']);
+$router->post('/admin/students/disable', [AdminController::class, 'disableStudent']);
+$router->post('/admin/calendar/move', [AdminController::class, 'moveCalendarEvent']);
 $router->post('/admin/enrollments', [LearningController::class, 'enrollStudent']);
 $router->post('/admin/enrollments/remove', [LearningController::class, 'removeEnrollment']);
 $router->get('/teacher', [TeacherController::class, 'dashboard']);

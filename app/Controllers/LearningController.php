@@ -108,11 +108,12 @@ class LearningController
         Auth::requireRole('ADMIN'); Csrf::validate();
         $student = (int) Request::input('student_id');
         $class = (int) Request::input('class_id');
-        if (!$this->userHasRole($student, 'STUDENT') || !$this->exists('school_classes', $class)) {
-            $this->error('/admin', 'Choose a valid student and class.');
+        $classRecord = $this->query('SELECT academic_year FROM school_classes WHERE id = ? AND status = 1', [$class])[0] ?? null;
+        if (!$this->userHasRole($student, 'STUDENT') || $classRecord === null) {
+            $this->error('/admin/classes', 'Choose an active student and class.');
         }
-        $year = $this->required('academic_year');
-        $this->pdo->prepare('INSERT INTO enrollments (student_id, class_id, academic_year) VALUES (?, ?, ?)')->execute([$student, $class, $year]);
+        // Retain the legacy enrollment column as a snapshot of the selected class year.
+        $this->pdo->prepare('INSERT INTO enrollments (student_id, class_id, academic_year) VALUES (?, ?, ?)')->execute([$student, $class, $classRecord['academic_year']]);
         $this->success('/admin', 'Student enrolled.');
     }
 
@@ -143,7 +144,17 @@ class LearningController
             'enrollments' => $this->query('SELECT cl.name, cl.academic_year, e.status, e.enrolled_at FROM enrollments e JOIN school_classes cl ON cl.id = e.class_id WHERE e.student_id = ? ORDER BY e.enrolled_at DESC', [$studentId]),
             'grades' => $this->query('SELECT g.type, g.score, g.max_score, g.created_at, c.title AS course_title FROM grades g JOIN courses c ON c.id = g.course_id WHERE g.student_id = ? ORDER BY g.created_at DESC', [$studentId]),
             'attendance' => $this->query('SELECT ar.status, ar.comment, ats.session_date, c.title AS course_title FROM attendance_records ar JOIN attendance_sessions ats ON ats.id = ar.attendance_session_id JOIN courses c ON c.id = ats.course_id WHERE ar.student_id = ? ORDER BY ats.session_date DESC', [$studentId]),
+            'calendar' => $this->studentRecordCalendar($studentId),
         ]);
+    }
+
+    private function studentRecordCalendar(int $studentId): array
+    {
+        $attendance = $this->query('SELECT ats.session_date AS event_date, ats.start_time, ats.end_time, c.title AS course_title, "ATTENDANCE" AS event_type FROM attendance_records ar JOIN attendance_sessions ats ON ats.id = ar.attendance_session_id JOIN courses c ON c.id = ats.course_id WHERE ar.student_id = ?', [$studentId]);
+        $exams = $this->query('SELECT DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title, "EXAM" AS event_type FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id WHERE n.student_id = ? AND e.start_at IS NOT NULL GROUP BY e.id', [$studentId]);
+        $events = array_merge($attendance, $exams);
+        usort($events, fn(array $left, array $right): int => strcmp((string) $right['event_date'], (string) $left['event_date']));
+        return array_slice($events, 0, 20);
     }
 
     public function teacher(): void

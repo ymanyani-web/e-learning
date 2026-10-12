@@ -31,7 +31,7 @@ class TeacherController
             'stats' => [
                 'courses' => $this->count('courses WHERE teacher_id = ?', [Auth::id()]),
                 'classes' => $this->count('SELECT DISTINCT class_id FROM courses WHERE teacher_id = ?', [Auth::id()]),
-                'students' => $this->count('SELECT DISTINCT e.student_id FROM enrollments e JOIN courses c ON c.class_id = e.class_id WHERE c.teacher_id = ? AND e.status = "ACTIVE"', [Auth::id()]),
+                'students' => $this->count('SELECT DISTINCT e.student_id FROM enrollments e JOIN courses c ON c.class_id = e.class_id JOIN users u ON u.id = e.student_id AND u.status = 1 WHERE c.teacher_id = ? AND e.status = "ACTIVE"', [Auth::id()]),
                 'slides' => $this->count('SELECT ch.id FROM course_chapters ch JOIN courses c ON c.id = ch.course_id WHERE c.teacher_id = ?', [Auth::id()]),
             ],
             'status' => $status,
@@ -45,8 +45,8 @@ class TeacherController
     public function classes(): void
     {
         Auth::requireRole('TEACHER');
-        $classes = $this->query('SELECT cl.id, cl.name, cl.academic_year, COUNT(DISTINCT e.student_id) AS student_count, COUNT(DISTINCT c.id) AS course_count FROM school_classes cl JOIN courses c ON c.class_id = cl.id LEFT JOIN enrollments e ON e.class_id = cl.id AND e.status = "ACTIVE" WHERE c.teacher_id = ? GROUP BY cl.id ORDER BY cl.academic_year DESC, cl.name', [Auth::id()]);
-        $students = $this->query('SELECT DISTINCT c.class_id, u.id, u.first_name, u.last_name, u.email FROM courses c JOIN enrollments e ON e.class_id = c.class_id AND e.status = "ACTIVE" JOIN users u ON u.id = e.student_id WHERE c.teacher_id = ? ORDER BY u.last_name, u.first_name', [Auth::id()]);
+        $classes = $this->query('SELECT cl.id, cl.name, cl.academic_year, COUNT(DISTINCT enrolled_user.id) AS student_count, COUNT(DISTINCT c.id) AS course_count FROM school_classes cl JOIN courses c ON c.class_id = cl.id LEFT JOIN enrollments e ON e.class_id = cl.id AND e.status = "ACTIVE" LEFT JOIN users enrolled_user ON enrolled_user.id = e.student_id AND enrolled_user.status = 1 WHERE c.teacher_id = ? GROUP BY cl.id ORDER BY cl.academic_year DESC, cl.name', [Auth::id()]);
+        $students = $this->query('SELECT DISTINCT c.class_id, u.id, u.first_name, u.last_name, u.email FROM courses c JOIN enrollments e ON e.class_id = c.class_id AND e.status = "ACTIVE" JOIN users u ON u.id = e.student_id AND u.status = 1 WHERE c.teacher_id = ? ORDER BY u.last_name, u.first_name', [Auth::id()]);
         $courses = $this->query('SELECT c.id, c.class_id, c.title, s.name AS subject_name FROM courses c JOIN subjects s ON s.id = c.subject_id WHERE c.teacher_id = ? ORDER BY s.name, c.title', [Auth::id()]);
         $sessions = $this->query('SELECT ats.*, c.class_id, c.title AS course_title FROM attendance_sessions ats JOIN courses c ON c.id = ats.course_id WHERE c.teacher_id = ? ORDER BY ats.session_date DESC, ats.start_time DESC', [Auth::id()]);
         $records = $this->query('SELECT ar.*, CONCAT(u.first_name, " ", u.last_name) AS student_name FROM attendance_records ar JOIN attendance_sessions ats ON ats.id = ar.attendance_session_id JOIN courses c ON c.id = ats.course_id JOIN users u ON u.id = ar.student_id WHERE c.teacher_id = ? ORDER BY u.last_name, u.first_name', [Auth::id()]);
@@ -86,7 +86,7 @@ class TeacherController
     {
         Auth::requireRole('TEACHER');
         $exam = $this->manualExam((int) Request::input('id'));
-        $students = $this->query('SELECT u.id, u.first_name, u.last_name, u.email, g.id AS grade_id, g.score FROM enrollments n JOIN users u ON u.id = n.student_id LEFT JOIN grades g ON g.student_id = u.id AND g.course_id = ? AND g.type = "EXAM" AND g.reference_id = ? WHERE n.class_id = ? AND n.status = "ACTIVE" ORDER BY u.last_name, u.first_name', [$exam['course_id'], $exam['id'], $exam['class_id']]);
+        $students = $this->query('SELECT u.id, u.first_name, u.last_name, u.email, g.id AS grade_id, g.score FROM enrollments n JOIN users u ON u.id = n.student_id LEFT JOIN grades g ON g.student_id = u.id AND g.course_id = ? AND g.type = "EXAM" AND g.reference_id = ? WHERE n.class_id = ? AND n.status = "ACTIVE" AND u.status = 1 ORDER BY u.last_name, u.first_name', [$exam['course_id'], $exam['id'], $exam['class_id']]);
         View::render('portal/exam-marks', [
             'user' => Auth::user(),
             'exam' => $exam,
@@ -131,7 +131,7 @@ class TeacherController
             if (\DateTimeImmutable::createFromFormat('!Y-m-d', $date)?->format('Y-m-d') !== $date || !preg_match('/^\d{2}:\d{2}$/', $start) || !preg_match('/^\d{2}:\d{2}$/', $end) || $end <= $start) {
                 $this->fail('/teacher/classes', 'Choose a valid date and start/end time.');
             }
-            $students = $this->query('SELECT student_id FROM enrollments WHERE class_id = ? AND status = "ACTIVE"', [$course['class_id']]);
+            $students = $this->query('SELECT e.student_id FROM enrollments e JOIN users u ON u.id = e.student_id AND u.status = 1 WHERE e.class_id = ? AND e.status = "ACTIVE"', [$course['class_id']]);
             $present = array_flip(array_map('intval', (array) ($_POST['present_students'] ?? [])));
             $this->pdo->beginTransaction();
             try {
