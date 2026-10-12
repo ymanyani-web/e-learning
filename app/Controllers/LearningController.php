@@ -74,9 +74,10 @@ class LearningController
         if (!$this->exists('subjects', $subject) || !$this->userHasRole($teacher, 'TEACHER') || !$this->exists('school_classes', $class)) {
             $this->error('/admin', 'Choose a valid subject, professor, and class.');
         }
+        $title = $this->query('SELECT name FROM subjects WHERE id = ?', [$subject])[0]['name'];
         $status = in_array(Request::input('status'), ['DRAFT', 'PUBLISHED'], true) ? Request::input('status') : 'DRAFT';
         $this->pdo->prepare('INSERT INTO courses (subject_id, teacher_id, class_id, title, description, status) VALUES (?, ?, ?, ?, ?, ?)')
-            ->execute([$subject, $teacher, $class, $this->required('title'), $this->text('description'), $status]);
+            ->execute([$subject, $teacher, $class, $title, $this->text('description'), $status]);
         $this->success('/admin', 'Course created and assigned.');
     }
 
