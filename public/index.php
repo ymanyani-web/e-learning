@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use App\Controllers\AuthController;
+use App\Controllers\AdminController;
+use App\Controllers\SettingsController;
 use App\Controllers\DashboardController;
 use App\Controllers\UserController;
 use App\Controllers\LearningController;
@@ -44,14 +46,19 @@ $router->get('/', function (): void {
 $router->get('/login', [AuthController::class, 'showLogin']);
 $router->post('/login', [AuthController::class, 'login']);
 $router->get('/logout', [AuthController::class, 'logout']);
+$router->get('/settings', [SettingsController::class, 'show']);
+$router->post('/settings', [SettingsController::class, 'update']);
 
-$router->get('/admin', [LearningController::class, 'admin']);
+$router->get('/admin', [AdminController::class, 'overview']);
+$router->get('/admin/students', [AdminController::class, 'students']);
+$router->get('/admin/teachers', [AdminController::class, 'teachers']);
+$router->get('/admin/classes', [AdminController::class, 'classes']);
+$router->get('/admin/subjects', [AdminController::class, 'subjects']);
 $router->post('/admin/classes', [LearningController::class, 'createClass']);
 $router->post('/admin/subjects', [LearningController::class, 'createSubject']);
 $router->post('/admin/courses', [LearningController::class, 'createCourse']);
 $router->post('/admin/enrollments', [LearningController::class, 'enrollStudent']);
 $router->post('/admin/enrollments/remove', [LearningController::class, 'removeEnrollment']);
-$router->get('/admin/students', [LearningController::class, 'studentRecords']);
 $router->get('/teacher', [LearningController::class, 'teacher']);
 $router->get('/teacher/course', [LearningController::class, 'courseEditor']);
 $router->post('/teacher/chapters', [LearningController::class, 'saveChapter']);

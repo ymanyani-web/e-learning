@@ -13,6 +13,10 @@ class User
     private bool $status;
     private ?string $createdAt;
     private ?string $updatedAt;
+    private ?string $phone;
+    private ?string $personalEmail;
+    private ?string $birthDate;
+    private string $preferredLanguage;
 
     public function __construct(
         ?int $id = null,
@@ -23,7 +27,11 @@ class User
         string $role = 'STUDENT',
         bool $status = true,
         ?string $createdAt = null,
-        ?string $updatedAt = null
+        ?string $updatedAt = null,
+        ?string $phone = null,
+        ?string $personalEmail = null,
+        ?string $birthDate = null,
+        string $preferredLanguage = 'en'
     ) {
         $this->id = $id;
         $this->firstName = $firstName;
@@ -34,6 +42,10 @@ class User
         $this->status = $status;
         $this->createdAt = $createdAt;
         $this->updatedAt = $updatedAt;
+        $this->phone = $phone;
+        $this->personalEmail = $personalEmail;
+        $this->birthDate = $birthDate;
+        $this->preferredLanguage = $preferredLanguage;
     }
 
     public function getId(): ?int { return $this->id; }
@@ -65,4 +77,9 @@ class User
 
     public function getUpdatedAt(): ?string { return $this->updatedAt; }
     public function setUpdatedAt(?string $updatedAt): void { $this->updatedAt = $updatedAt; }
+
+    public function getPhone(): ?string { return $this->phone; }
+    public function getPersonalEmail(): ?string { return $this->personalEmail; }
+    public function getBirthDate(): ?string { return $this->birthDate; }
+    public function getPreferredLanguage(): string { return $this->preferredLanguage; }
 }

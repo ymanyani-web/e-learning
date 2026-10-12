@@ -99,7 +99,11 @@ class UserRepository extends BaseRepository
             $row['role'],
             (bool) $row['status'],
             $row['created_at'] ?? null,
-            $row['updated_at'] ?? null
+            $row['updated_at'] ?? null,
+            $row['phone'] ?? null,
+            $row['personal_email'] ?? null,
+            $row['birth_date'] ?? null,
+            $row['preferred_language'] ?? 'en'
         );
     }
 }

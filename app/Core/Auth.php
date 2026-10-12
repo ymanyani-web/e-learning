@@ -27,7 +27,9 @@ class Auth
             'last_name' => $user->getLastName(),
             'email' => $user->getEmail(),
             'role' => $user->getRole(),
+            'preferred_language' => $user->getPreferredLanguage(),
         ]);
+        Locale::setLanguage($user->getPreferredLanguage());
 
         return true;
     }
