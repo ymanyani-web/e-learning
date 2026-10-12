@@ -1,0 +1,4 @@
+<?php $title = 'Professor workspace | LearnSpace'; require __DIR__ . '/_header.php'; ?>
+<h1>Professor workspace</h1><p class="muted">Open a course to create lessons, use AI drafting, and build its exam.</p>
+<div class="grid"><?php if (!$courses): ?><section class="card"><p class="muted">No course is assigned to you yet.</p></section><?php endif; ?><?php foreach ($courses as $course): ?><section class="card"><span class="pill"><?= h($course['status']) ?></span><h2 style="margin-top:9px"><?= h($course['title']) ?></h2><p class="muted"><?= h($course['subject_name']) ?> · <?= h($course['class_name']) ?></p><p><?= h($course['description']) ?></p><a class="button" href="/teacher/course?id=<?= $course['id'] ?>">Edit content & exams</a></section><?php endforeach; ?></div>
+<?php require __DIR__ . '/_footer.php'; ?>
