@@ -27,11 +27,13 @@ class AiService
         );
     }
 
-    public function generateQuestions(string $topic, int $count): array
+    public function generateQuestions(string $topic, int $count, string $courseContent, string $difficulty): array
     {
         $count = max(1, min($count, 10));
+        $courseContent = mb_substr(trim(strip_tags($courseContent)), 0, 12000);
         $response = $this->complete(
-            "Create {$count} accurate multiple-choice questions about \"{$topic}\" for an educational exam. "
+            "Create {$count} accurate {$difficulty}-difficulty multiple-choice questions about \"{$topic}\" for an educational exam. "
+            . "Base the questions only on this course material when it is relevant:\n{$courseContent}\n\n"
             . 'Return only valid JSON: an array of objects with keys "question", "options" (exactly four short strings), and "correct" (0-3).'
         );
         $questions = $this->jsonCollection($response, 'questions');
@@ -66,6 +68,16 @@ class AiService
             }
         }
         return $slides;
+    }
+
+    public function expandSlide(string $subject, string $title, string $content, string $brief): string
+    {
+        return $this->complete(
+            "Improve and expand this educational slide for the subject \"{$subject}\". Title: \"{$title}\". "
+            . "Current slide content: \"{$content}\". Teacher request: \"{$brief}\". "
+            . 'Return only the improved slide body as HTML. Use only p, strong, em, ul, ol, li, h2, h3, and blockquote. '
+            . 'Keep all accurate existing ideas, add useful explanations or examples, and do not include a title.'
+        );
     }
 
     private function complete(string $prompt): string
@@ -139,6 +151,17 @@ class AiService
         }
 
         $decoded = json_decode($json, true);
+        if (!is_array($decoded)) {
+            $positions = array_filter([
+                strpos($json, '{'),
+                strpos($json, '['),
+            ], static fn(int|false $position): bool => $position !== false);
+            $first = $positions === [] ? PHP_INT_MAX : min($positions);
+            $last = max(strrpos($json, '}') ?: -1, strrpos($json, ']') ?: -1);
+            if ($first !== PHP_INT_MAX && $last >= $first) {
+                $decoded = json_decode(substr($json, $first, $last - $first + 1), true);
+            }
+        }
         if (!is_array($decoded)) {
             return [];
         }

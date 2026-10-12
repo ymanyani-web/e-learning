@@ -1,0 +1,2 @@
+ALTER TABLE exams
+    ADD COLUMN delivery_mode VARCHAR(20) NOT NULL DEFAULT 'ONLINE' AFTER max_attempts;

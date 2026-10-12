@@ -32,6 +32,7 @@ class StudentController
             'classes' => $this->query('SELECT cl.name, cl.academic_year FROM enrollments e JOIN school_classes cl ON cl.id = e.class_id WHERE e.student_id = ? AND e.status = "ACTIVE" ORDER BY cl.academic_year DESC, cl.name', [Auth::id()]),
             'ongoingCourses' => array_values(array_filter($courses, fn(array $course): bool => $course['progress_percent'] < 100)),
             'completedCourses' => array_values(array_filter($courses, fn(array $course): bool => $course['chapter_total'] > 0 && $course['progress_percent'] >= 100)),
+            'scheduledExams' => $this->query('SELECT e.title, e.delivery_mode, e.start_at, e.end_at, c.title AS course_title FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id WHERE n.student_id = ? AND n.status = "ACTIVE" AND c.status = "PUBLISHED" AND e.status = "PUBLISHED" AND e.start_at IS NOT NULL AND e.end_at >= NOW() ORDER BY e.start_at LIMIT 8', [Auth::id()]),
         ]);
     }
 
@@ -45,7 +46,7 @@ class StudentController
     {
         Auth::requireRole('STUDENT');
         $this->render('exams', [
-            'exams' => $this->query('SELECT e.*, c.title AS course_title, s.name AS subject_name, COUNT(a.id) AS attempts_used FROM exams e JOIN courses c ON c.id = e.course_id JOIN subjects s ON s.id = c.subject_id JOIN enrollments n ON n.class_id = c.class_id LEFT JOIN exam_attempts a ON a.exam_id = e.id AND a.student_id = ? WHERE n.student_id = ? AND n.status = "ACTIVE" AND c.status = "PUBLISHED" AND e.status = "PUBLISHED" AND (e.start_at IS NULL OR e.start_at <= NOW()) AND (e.end_at IS NULL OR e.end_at >= NOW()) GROUP BY e.id ORDER BY e.start_at IS NULL, e.start_at, e.id DESC', [Auth::id(), Auth::id()]),
+            'exams' => $this->query('SELECT e.*, c.title AS course_title, s.name AS subject_name, COUNT(a.id) AS attempts_used, MAX(CASE WHEN a.status = "GRADED" THEN a.id END) AS latest_graded_attempt, CASE WHEN e.delivery_mode = "ONLINE" AND e.start_at <= NOW() AND e.end_at >= NOW() THEN 1 ELSE 0 END AS is_available FROM exams e JOIN courses c ON c.id = e.course_id JOIN subjects s ON s.id = c.subject_id JOIN enrollments n ON n.class_id = c.class_id LEFT JOIN exam_attempts a ON a.exam_id = e.id AND a.student_id = ? WHERE n.student_id = ? AND n.status = "ACTIVE" AND c.status = "PUBLISHED" AND e.status = "PUBLISHED" GROUP BY e.id ORDER BY e.start_at IS NULL, e.start_at, e.id DESC', [Auth::id(), Auth::id()]),
         ]);
     }
 

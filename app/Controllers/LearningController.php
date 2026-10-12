@@ -77,9 +77,30 @@ class LearningController
         }
         $title = $this->query('SELECT name FROM subjects WHERE id = ?', [$subject])[0]['name'];
         $status = in_array(Request::input('status'), ['DRAFT', 'PUBLISHED'], true) ? Request::input('status') : 'DRAFT';
-        $this->pdo->prepare('INSERT INTO courses (subject_id, teacher_id, class_id, title, description, status) VALUES (?, ?, ?, ?, ?, ?)')
-            ->execute([$subject, $teacher, $class, $title, $this->text('description'), $status]);
-        $this->success('/admin', 'Course created and assigned.');
+        $startDate = $this->date('start_date');
+        $endDate = $this->date('end_date');
+        if ($startDate === null || $endDate === null || $endDate < $startDate) {
+            $this->error('/admin/classes', 'Choose a valid course start and end date.');
+        }
+        $slots = $this->scheduleSlots();
+        if ($slots === []) {
+            $this->error('/admin/classes', 'Choose at least one weekly course time slot.');
+        }
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare('INSERT INTO courses (subject_id, teacher_id, class_id, title, description, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                ->execute([$subject, $teacher, $class, $title, $this->text('description'), $startDate, $endDate, $status]);
+            $courseId = (int) $this->pdo->lastInsertId();
+            $statement = $this->pdo->prepare('INSERT INTO course_schedule_slots (course_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)');
+            foreach ($slots as $slot) {
+                $statement->execute([$courseId, $slot['weekday'], $slot['start_time'], $slot['end_time']]);
+            }
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        $this->success('/admin/classes', 'Course created and assigned.');
     }
 
     public function enrollStudent(): void
@@ -188,15 +209,62 @@ class LearningController
         $this->success('/teacher/course?id=' . $course['id'], 'AI created draft slides. Review and publish each slide.');
     }
 
+    public function updateChapter(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $chapter = $this->query('SELECT ch.*, c.subject_id, s.name AS subject_name FROM course_chapters ch JOIN courses c ON c.id = ch.course_id JOIN subjects s ON s.id = c.subject_id WHERE ch.id = ? AND c.teacher_id = ?', [(int) Request::input('chapter_id'), Auth::id()])[0] ?? null;
+        if ($chapter === null) {
+            Response::abort(404, 'Slide not found.');
+        }
+
+        $title = $this->required('title');
+        $content = trim((string) Request::input('content', ''));
+        if (Request::input('expand_ai') === '1') {
+            try {
+                $content = (new AiService())->expandSlide($chapter['subject_name'], $title, $content, $this->text('ai_brief'));
+            } catch (RuntimeException $e) {
+                $this->error('/teacher/course?id=' . $chapter['course_id'], $e->getMessage());
+            }
+        }
+        $content = ContentSanitizer::sanitize($content);
+        if ($content === '') {
+            $this->error('/teacher/course?id=' . $chapter['course_id'], 'Slide content is required.');
+        }
+
+        $status = Request::input('status') === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT';
+        $this->pdo->prepare('UPDATE course_chapters SET title = ?, content = ?, status = ? WHERE id = ?')->execute([$title, $content, $status, $chapter['id']]);
+        $this->success('/teacher/course?id=' . $chapter['course_id'], 'Slide updated.');
+    }
+
+    public function uploadInlineImage(): never
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $this->teacherCourse((int) Request::input('course_id'));
+        $image = $this->uploadSlideMedia('image', true);
+        if ($image === null) {
+            Response::abort(422, 'Choose an image to insert.');
+        }
+
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['url' => Request::basePath() . '/' . $image['path']], JSON_THROW_ON_ERROR);
+        exit;
+    }
+
     public function createExam(): void
     {
         Auth::requireRole('TEACHER'); Csrf::validate();
         $course = $this->teacherCourse((int) Request::input('course_id'));
         $status = Request::input('status') === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT';
+        $deliveryMode = Request::input('delivery_mode') === 'MANUAL' ? 'MANUAL' : 'ONLINE';
         $totalPoints = max(1, (float) Request::input('total_points', 20));
         $passingScore = max(0, min($totalPoints, (float) Request::input('passing_score', 0)));
-        $this->pdo->prepare('INSERT INTO exams (course_id, title, description, duration_minutes, total_points, passing_score, max_attempts, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-            ->execute([$course['id'], $this->required('title'), $this->text('description'), max(1, (int) Request::input('duration_minutes', 30)), $totalPoints, $passingScore, max(1, (int) Request::input('max_attempts', 1)), $status]);
+        $startAt = $this->dateTime('start_at');
+        $endAt = $this->dateTime('end_at');
+        if ($startAt === null || $endAt === null || $endAt <= $startAt) {
+            $this->error('/teacher/course?id=' . $course['id'], 'Choose a valid exam date, start time, and end time.');
+        }
+        $this->pdo->prepare('INSERT INTO exams (course_id, title, description, duration_minutes, total_points, passing_score, max_attempts, delivery_mode, start_at, end_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$course['id'], $this->required('title'), $this->text('description'), max(1, (int) Request::input('duration_minutes', 30)), $totalPoints, $passingScore, max(1, (int) Request::input('max_attempts', 1)), $deliveryMode, $startAt, $endAt, $status]);
         $this->success('/teacher/course?id=' . $course['id'], 'Exam created. Add questions below.');
     }
 
@@ -257,7 +325,12 @@ class LearningController
         Auth::requireRole('TEACHER'); Csrf::validate();
         $exam = $this->teacherExam((int) Request::input('exam_id'));
         try {
-            $questions = (new AiService())->generateQuestions($this->required('topic'), (int) Request::input('count', 3));
+            $difficulty = (string) Request::input('difficulty', 'intermediate');
+            if (!in_array($difficulty, ['beginner', 'intermediate', 'advanced'], true)) {
+                $this->error('/teacher/course?id=' . $exam['course_id'], 'Choose a valid difficulty.');
+            }
+            $courseContent = implode("\n\n", array_column($this->query('SELECT content FROM course_chapters WHERE course_id = ? ORDER BY position', [$exam['course_id']]), 'content'));
+            $questions = (new AiService())->generateQuestions($this->required('topic'), (int) Request::input('count', 3), $courseContent, $difficulty);
             $position = (int) $this->pdo->query('SELECT COALESCE(MAX(position), 0) FROM exam_questions WHERE exam_id = ' . (int) $exam['id'])->fetchColumn();
             $this->pdo->beginTransaction();
             $insertQuestion = $this->pdo->prepare('INSERT INTO exam_questions (exam_id, question, type, points, position) VALUES (?, ?, "MULTIPLE_CHOICE", 1, ?)');
@@ -292,7 +365,7 @@ class LearningController
         Auth::requireRole('STUDENT');
         $course = $this->studentCourse((int) Request::input('id'));
         $chapters = $this->query('SELECT * FROM course_chapters WHERE course_id = ? AND status = "PUBLISHED" ORDER BY position', [$course['id']]);
-        $exams = $this->query('SELECT * FROM exams WHERE course_id = ? AND status = "PUBLISHED" ORDER BY id DESC', [$course['id']]);
+        $exams = $this->query('SELECT e.*, CASE WHEN e.delivery_mode = "ONLINE" AND e.start_at <= NOW() AND e.end_at >= NOW() THEN 1 ELSE 0 END AS is_available FROM exams e WHERE e.course_id = ? AND e.status = "PUBLISHED" ORDER BY e.start_at, e.id DESC', [$course['id']]);
         $resources = $this->query('SELECT r.*, ch.title AS chapter_title FROM course_resources r JOIN course_chapters ch ON ch.id = r.chapter_id WHERE ch.course_id = ? AND ch.status = "PUBLISHED" ORDER BY r.created_at', [$course['id']]);
         $completedChapters = array_column($this->query('SELECT chapter_id FROM course_chapter_progress WHERE student_id = ? AND completed_at IS NOT NULL', [Auth::id()]), 'chapter_id');
         View::render('portal/course-study', compact('course', 'chapters', 'exams', 'resources', 'completedChapters') + ['answer' => Session::consumeFlash('ai_answer'), 'message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
@@ -363,13 +436,67 @@ class LearningController
             $this->success('/student/course?id=' . $exam['course_id'], 'Exam submitted. Your professor will mark the text answers before the final result is available.');
         }
         $result = $score >= (float) $exam['passing_score'] ? 'Passed' : 'Not yet passed';
-        $this->success('/student/course?id=' . $exam['course_id'], "Exam submitted. Score: {$score} / {$exam['total_points']}. {$result}.");
+        $this->success('/student/exam/result?id=' . $attemptId, "Exam submitted. Score: {$score} / {$exam['total_points']}. {$result}.");
     }
 
-    private function usersByRole(string $role): array { return $this->query('SELECT id, first_name, last_name, email FROM users WHERE role = ? AND status = 1 ORDER BY last_name, first_name', [$role]); }
-    private function uploadSlideMedia(): ?array
+    public function examResult(): void
     {
-        $file = $_FILES['media'] ?? null;
+        Auth::requireRole('STUDENT');
+        $attempt = $this->query('SELECT a.*, e.title AS exam_title, e.description AS exam_description, e.total_points, e.passing_score, c.id AS course_id, c.title AS course_title FROM exam_attempts a JOIN exams e ON e.id = a.exam_id JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id AND n.student_id = ? AND n.status = "ACTIVE" WHERE a.id = ? AND a.student_id = ?', [Auth::id(), (int) Request::input('id'), Auth::id()])[0] ?? null;
+        if ($attempt === null) {
+            Response::abort(404, 'Exam result not found.');
+        }
+        if ($attempt['status'] !== 'GRADED') {
+            $this->error('/student/course?id=' . $attempt['course_id'], 'This result will be available after your professor grades the exam.');
+        }
+
+        $answers = $this->query('SELECT a.text_answer, a.selected_option_ids, a.points_awarded, q.id AS question_id, q.question, q.type, q.points FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id WHERE a.attempt_id = ? ORDER BY q.position', [$attempt['id']]);
+        foreach ($answers as &$answer) {
+            $answer['selected_option_ids'] = json_decode((string) ($answer['selected_option_ids'] ?? '[]'), true) ?: [];
+            $answer['options'] = $this->query('SELECT id, option_text, is_correct FROM exam_options WHERE question_id = ? ORDER BY id', [$answer['question_id']]);
+        }
+        unset($answer);
+
+        View::render('portal/exam-result', compact('attempt', 'answers') + [
+            'user' => Auth::user(),
+            'message' => Session::consumeFlash('success'),
+            'error' => Session::consumeFlash('error'),
+        ]);
+    }
+
+    private function dateTime(string $key): ?string
+    {
+        $value = trim((string) Request::input($key, ''));
+        $dateTime = \DateTimeImmutable::createFromFormat('Y-m-d\TH:i', $value);
+        return $dateTime !== false && $dateTime->format('Y-m-d\TH:i') === $value ? $dateTime->format('Y-m-d H:i:s') : null;
+    }
+    private function date(string $key): ?string
+    {
+        $value = trim((string) Request::input($key, ''));
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        return $date !== false && $date->format('Y-m-d') === $value ? $value : null;
+    }
+    private function scheduleSlots(): array
+    {
+        $allowed = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
+        $selected = array_unique(array_filter((array) ($_POST['schedule_days'] ?? []), fn($day): bool => is_string($day) && in_array($day, $allowed, true)));
+        $starts = (array) ($_POST['schedule_start'] ?? []);
+        $ends = (array) ($_POST['schedule_end'] ?? []);
+        $slots = [];
+        foreach ($selected as $day) {
+            $start = (string) ($starts[$day] ?? '');
+            $end = (string) ($ends[$day] ?? '');
+            if (!preg_match('/^\d{2}:\d{2}$/', $start) || !preg_match('/^\d{2}:\d{2}$/', $end) || $end <= $start) {
+                $this->error('/admin/classes', 'Choose valid start and end times for every selected weekday.');
+            }
+            $slots[] = ['weekday' => $day, 'start_time' => $start . ':00', 'end_time' => $end . ':00'];
+        }
+        return $slots;
+    }
+    private function usersByRole(string $role): array { return $this->query('SELECT id, first_name, last_name, email FROM users WHERE role = ? AND status = 1 ORDER BY last_name, first_name', [$role]); }
+    private function uploadSlideMedia(string $field = 'media', bool $imagesOnly = false): ?array
+    {
+        $file = $_FILES[$field] ?? null;
         if (!is_array($file) || (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
             return null;
         }
@@ -388,6 +515,9 @@ class LearningController
             'video/mp4' => ['extension' => 'mp4', 'type' => 'VIDEO'],
             'video/webm' => ['extension' => 'webm', 'type' => 'VIDEO'],
         ];
+        if ($imagesOnly) {
+            $allowed = array_filter($allowed, fn(array $media): bool => $media['type'] === 'IMAGE');
+        }
         if (!is_string($mime) || !isset($allowed[$mime])) {
             $this->error(Request::path(), 'Upload a JPEG, PNG, WebP, GIF, MP4, or WebM file.');
         }
@@ -410,7 +540,7 @@ class LearningController
     private function teacherCourse(int $id): array { $course = $this->query('SELECT c.*, s.name AS subject_name FROM courses c JOIN subjects s ON s.id = c.subject_id WHERE c.id = ? AND c.teacher_id = ?', [$id, Auth::id()])[0] ?? null; if ($course === null) Response::abort(404, 'Course not found.'); return $course; }
     private function teacherExam(int $id): array { $exam = $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id WHERE e.id = ? AND c.teacher_id = ?', [$id, Auth::id()])[0] ?? null; if ($exam === null) Response::abort(404, 'Exam not found.'); return $exam; }
     private function studentCourse(int $id): array { $course = $this->query('SELECT c.*, s.name AS subject_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN enrollments e ON e.class_id = c.class_id AND e.student_id = ? AND e.status = "ACTIVE" WHERE c.id = ? AND c.status = "PUBLISHED"', [Auth::id(), $id])[0] ?? null; if ($course === null) Response::abort(404, 'Course not found.'); return $course; }
-    private function studentExam(int $id): array { $exam = $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id AND n.student_id = ? AND n.status = "ACTIVE" WHERE e.id = ? AND e.status = "PUBLISHED" AND c.status = "PUBLISHED" AND (e.start_at IS NULL OR e.start_at <= NOW()) AND (e.end_at IS NULL OR e.end_at >= NOW())', [Auth::id(), $id])[0] ?? null; if ($exam === null) Response::abort(404, 'Exam not found or is unavailable.'); return $exam; }
+    private function studentExam(int $id): array { $exam = $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id AND n.student_id = ? AND n.status = "ACTIVE" WHERE e.id = ? AND e.delivery_mode = "ONLINE" AND e.status = "PUBLISHED" AND c.status = "PUBLISHED" AND e.start_at <= NOW() AND e.end_at >= NOW()', [Auth::id(), $id])[0] ?? null; if ($exam === null) Response::abort(404, 'Exam is not available at this time.'); return $exam; }
     private function success(string $path, string $message): never { Session::flash('success', $message); Response::redirect($path); }
     private function error(string $path, string $message): never { Session::flash('error', $message); Response::redirect($path); }
 }

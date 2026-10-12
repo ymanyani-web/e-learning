@@ -10,7 +10,7 @@ use DOMNode;
 
 class ContentSanitizer
 {
-    private const ALLOWED_TAGS = ['p', 'br', 'strong', 'em', 'u', 'ul', 'ol', 'li', 'h2', 'h3', 'blockquote'];
+    private const ALLOWED_TAGS = ['p', 'br', 'strong', 'em', 'u', 'ul', 'ol', 'li', 'h2', 'h3', 'blockquote', 'img'];
 
     public static function sanitize(string $html): string
     {
@@ -42,8 +42,24 @@ class ContentSanitizer
                     $node->removeChild($child);
                     continue;
                 }
-                while ($child->attributes->length > 0) {
-                    $child->removeAttributeNode($child->attributes->item(0));
+                if (strtolower($child->tagName) === 'img') {
+                    $source = $child->getAttribute('src');
+                    $alt = $child->getAttribute('alt');
+                    if (preg_match('#(?:^|/)uploads/course-media/[a-f0-9]{32}\.(?:jpg|png|webp|gif)$#', $source) !== 1) {
+                        $node->removeChild($child);
+                        continue;
+                    }
+                    while ($child->attributes->length > 0) {
+                        $child->removeAttributeNode($child->attributes->item(0));
+                    }
+                    $child->setAttribute('src', $source);
+                    if ($alt !== '') {
+                        $child->setAttribute('alt', $alt);
+                    }
+                } else {
+                    while ($child->attributes->length > 0) {
+                        $child->removeAttributeNode($child->attributes->item(0));
+                    }
                 }
             }
             self::cleanChildren($child);

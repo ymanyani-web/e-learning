@@ -25,6 +25,7 @@ DROP TABLE IF EXISTS assignments;
 DROP TABLE IF EXISTS course_resources;
 DROP TABLE IF EXISTS course_chapter_progress;
 DROP TABLE IF EXISTS course_chapters;
+DROP TABLE IF EXISTS course_schedule_slots;
 DROP TABLE IF EXISTS courses;
 DROP TABLE IF EXISTS subjects;
 DROP TABLE IF EXISTS enrollments;
@@ -146,6 +147,8 @@ CREATE TABLE courses (
     class_id INT UNSIGNED NOT NULL,
     title VARCHAR(255) NOT NULL,
     description TEXT NULL,
+    start_date DATE NULL,
+    end_date DATE NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -169,13 +172,37 @@ CREATE TABLE courses (
         ON DELETE CASCADE,
 
     CONSTRAINT chk_course_status
-        CHECK (status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED'))
+        CHECK (status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED')),
+    CONSTRAINT chk_course_dates
+        CHECK (end_date IS NULL OR start_date IS NULL OR end_date >= start_date)
 ) ENGINE=InnoDB;
 
 CREATE INDEX idx_courses_subject ON courses(subject_id);
 CREATE INDEX idx_courses_teacher ON courses(teacher_id);
 CREATE INDEX idx_courses_class ON courses(class_id);
 CREATE INDEX idx_courses_status ON courses(status);
+
+CREATE TABLE course_schedule_slots (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    course_id INT UNSIGNED NOT NULL,
+    weekday VARCHAR(10) NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+
+    CONSTRAINT fk_course_schedule_slots_course
+        FOREIGN KEY (course_id)
+        REFERENCES courses(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT chk_course_schedule_weekday
+        CHECK (weekday IN ('MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY')),
+    CONSTRAINT chk_course_schedule_time
+        CHECK (end_time > start_time),
+    CONSTRAINT uq_course_schedule_slot
+        UNIQUE (course_id, weekday, start_time)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_course_schedule_slots_course ON course_schedule_slots(course_id);
 
 -- =========================================================
 -- 6. COURSE CHAPTERS
@@ -338,6 +365,7 @@ CREATE TABLE exams (
     total_points DECIMAL(7,2) NOT NULL DEFAULT 20.00,
     passing_score DECIMAL(7,2) NOT NULL DEFAULT 0.00,
     max_attempts INT NOT NULL DEFAULT 1,
+    delivery_mode VARCHAR(20) NOT NULL DEFAULT 'ONLINE',
     start_at DATETIME NULL,
     end_at DATETIME NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
@@ -353,6 +381,7 @@ CREATE TABLE exams (
     CONSTRAINT chk_exam_duration CHECK (duration_minutes > 0),
     CONSTRAINT chk_exam_total_points CHECK (total_points >= 0),
     CONSTRAINT chk_exam_max_attempts CHECK (max_attempts > 0),
+    CONSTRAINT chk_exam_delivery_mode CHECK (delivery_mode IN ('ONLINE', 'MANUAL')),
     CONSTRAINT chk_exam_status
         CHECK (status IN ('DRAFT', 'PUBLISHED', 'CLOSED', 'ARCHIVED')),
     CONSTRAINT chk_exam_dates CHECK (
