@@ -50,6 +50,8 @@ $router->post('/admin/classes', [LearningController::class, 'createClass']);
 $router->post('/admin/subjects', [LearningController::class, 'createSubject']);
 $router->post('/admin/courses', [LearningController::class, 'createCourse']);
 $router->post('/admin/enrollments', [LearningController::class, 'enrollStudent']);
+$router->post('/admin/enrollments/remove', [LearningController::class, 'removeEnrollment']);
+$router->get('/admin/students', [LearningController::class, 'studentRecords']);
 $router->get('/teacher', [LearningController::class, 'teacher']);
 $router->get('/teacher/course', [LearningController::class, 'courseEditor']);
 $router->post('/teacher/chapters', [LearningController::class, 'saveChapter']);

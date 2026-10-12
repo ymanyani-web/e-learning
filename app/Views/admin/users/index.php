@@ -1,41 +1,15 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Users</title>
-    <style>
-        body{font-family:Arial,sans-serif;margin:40px;background:#f8fafc}
-        table{width:100%;border-collapse:collapse;background:white}
-        th,td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:left}
-        .success{background:#dcfce7;padding:10px;margin:12px 0}
-        .error{background:#fee2e2;padding:10px;margin:12px 0}
-    </style>
-</head>
-<body>
-<p><a href="<?= htmlspecialchars(\App\Core\Request::basePath() . '/admin') ?>">← Dashboard</a> | <a href="<?= htmlspecialchars(\App\Core\Request::basePath() . '/admin/users/create') ?>">+ Create user</a> | <a href="<?= htmlspecialchars(\App\Core\Request::basePath() . '/logout') ?>">Logout</a></p>
-<h1>Users</h1>
+<?php
+$title = 'People | LearnSpace';
+$message = $success ?? null;
+require dirname(__DIR__, 2) . '/portal/_header.php';
+?>
+<section class="hero">
+    <div><p class="pill">PEOPLE</p><h1>Students, professors, and administrators</h1><p class="muted">Create and review every account that can access your school workspace.</p></div>
+    <div class="row"><a class="button secondary" href="/admin/users/create?role=STUDENT">Add student</a><a class="button" href="/admin/users/create?role=TEACHER">Add professor</a></div>
+</section>
 
-<?php if (!empty($success)): ?><div class="success"><?= htmlspecialchars($success) ?></div><?php endif; ?>
-<?php if (!empty($error)): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
-
-<table>
-    <thead>
-    <tr>
-        <th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th>
-    </tr>
-    </thead>
-    <tbody>
-    <?php foreach ($users as $item): ?>
-        <tr>
-            <td><?= (int) $item->getId() ?></td>
-            <td><?= htmlspecialchars($item->getFullName()) ?></td>
-            <td><?= htmlspecialchars($item->getEmail()) ?></td>
-            <td><?= htmlspecialchars($item->getRole()) ?></td>
-            <td><?= $item->isActive() ? 'Active' : 'Inactive' ?></td>
-        </tr>
-    <?php endforeach; ?>
-    </tbody>
-</table>
-</body>
-</html>
+<section class="card">
+    <div class="section-heading"><div><h2>All people</h2><p class="muted"><?= count($users) ?> account<?= count($users) === 1 ? '' : 's' ?></p></div></div>
+    <?php if (!$users): ?><p class="empty">No user accounts found.</p><?php else: ?><div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody><?php foreach ($users as $item): ?><tr><td><strong><?= h($item->getFullName()) ?></strong></td><td><?= h($item->getEmail()) ?></td><td><span class="pill"><?= h($item->getRole()) ?></span></td><td><?= $item->isActive() ? 'Active' : 'Inactive' ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+</section>
+<?php require dirname(__DIR__, 2) . '/portal/_footer.php'; ?>

@@ -29,11 +29,19 @@ class LearningController
         Auth::requireRole('ADMIN');
         View::render('portal/admin', [
             'user' => Auth::user(),
+            'stats' => [
+                'students' => $this->count('users WHERE role = "STUDENT" AND status = 1'),
+                'teachers' => $this->count('users WHERE role = "TEACHER" AND status = 1'),
+                'classes' => $this->count('school_classes WHERE status = 1'),
+                'courses' => $this->count('courses'),
+            ],
             'classes' => $this->pdo->query('SELECT * FROM school_classes ORDER BY academic_year DESC, name')->fetchAll(),
             'subjects' => $this->pdo->query('SELECT * FROM subjects ORDER BY name')->fetchAll(),
             'teachers' => $this->usersByRole('TEACHER'),
             'students' => $this->usersByRole('STUDENT'),
             'courses' => $this->pdo->query('SELECT c.*, s.name AS subject_name, cl.name AS class_name, CONCAT(u.first_name, " ", u.last_name) AS teacher_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN school_classes cl ON cl.id = c.class_id JOIN users u ON u.id = c.teacher_id ORDER BY c.id DESC')->fetchAll(),
+            'enrollments' => $this->query('SELECT e.id, e.academic_year, e.status, CONCAT(u.first_name, " ", u.last_name) AS student_name, cl.name AS class_name FROM enrollments e JOIN users u ON u.id = e.student_id JOIN school_classes cl ON cl.id = e.class_id WHERE e.status = "ACTIVE" ORDER BY e.id DESC LIMIT 8'),
+            'studentSummaries' => $this->query('SELECT u.id, CONCAT(u.first_name, " ", u.last_name) AS student_name, u.email, (SELECT GROUP_CONCAT(DISTINCT cl.name ORDER BY cl.name SEPARATOR ", ") FROM enrollments e JOIN school_classes cl ON cl.id = e.class_id WHERE e.student_id = u.id AND e.status = "ACTIVE") AS classes, (SELECT ROUND(AVG(g.score / NULLIF(g.max_score, 0) * 100), 1) FROM grades g WHERE g.student_id = u.id) AS grade_average, (SELECT COUNT(*) FROM attendance_records ar WHERE ar.student_id = u.id) AS attendance_entries FROM users u WHERE u.role = "STUDENT" AND u.status = 1 ORDER BY u.last_name, u.first_name LIMIT 8'),
             'message' => Session::consumeFlash('success'),
             'error' => Session::consumeFlash('error'),
         ]);
@@ -83,6 +91,36 @@ class LearningController
         $year = $this->required('academic_year');
         $this->pdo->prepare('INSERT INTO enrollments (student_id, class_id, academic_year) VALUES (?, ?, ?)')->execute([$student, $class, $year]);
         $this->success('/admin', 'Student enrolled.');
+    }
+
+    public function removeEnrollment(): void
+    {
+        Auth::requireRole('ADMIN'); Csrf::validate();
+        $enrollmentId = (int) Request::input('enrollment_id');
+        $statement = $this->pdo->prepare('DELETE FROM enrollments WHERE id = ?');
+        $statement->execute([$enrollmentId]);
+        if ($statement->rowCount() !== 1) {
+            $this->error('/admin', 'Enrollment was not found.');
+        }
+        $this->success('/admin', 'Student removed from the class.');
+    }
+
+    public function studentRecords(): void
+    {
+        Auth::requireRole('ADMIN');
+        $studentId = (int) Request::input('id');
+        $student = $this->query('SELECT id, first_name, last_name, email FROM users WHERE id = ? AND role = "STUDENT"', [$studentId])[0] ?? null;
+        if ($student === null) {
+            Response::abort(404, 'Student not found.');
+        }
+
+        View::render('portal/student-record', [
+            'user' => Auth::user(),
+            'student' => $student,
+            'enrollments' => $this->query('SELECT cl.name, cl.academic_year, e.status, e.enrolled_at FROM enrollments e JOIN school_classes cl ON cl.id = e.class_id WHERE e.student_id = ? ORDER BY e.enrolled_at DESC', [$studentId]),
+            'grades' => $this->query('SELECT g.type, g.score, g.max_score, g.created_at, c.title AS course_title FROM grades g JOIN courses c ON c.id = g.course_id WHERE g.student_id = ? ORDER BY g.created_at DESC', [$studentId]),
+            'attendance' => $this->query('SELECT ar.status, ar.comment, ats.session_date, c.title AS course_title FROM attendance_records ar JOIN attendance_sessions ats ON ats.id = ar.attendance_session_id JOIN courses c ON c.id = ats.course_id WHERE ar.student_id = ? ORDER BY ats.session_date DESC', [$studentId]),
+        ]);
     }
 
     public function teacher(): void
@@ -249,6 +287,7 @@ class LearningController
     }
 
     private function usersByRole(string $role): array { return $this->query('SELECT id, first_name, last_name, email FROM users WHERE role = ? AND status = 1 ORDER BY last_name, first_name', [$role]); }
+    private function count(string $from): int { return (int) $this->pdo->query("SELECT COUNT(*) FROM {$from}")->fetchColumn(); }
     private function query(string $sql, array $parameters = []): array { $statement = $this->pdo->prepare($sql); $statement->execute($parameters); return $statement->fetchAll(); }
     private function exists(string $table, int $id): bool { return $id > 0 && (bool) $this->query("SELECT id FROM {$table} WHERE id = ?", [$id]); }
     private function userHasRole(int $id, string $role): bool { return (bool) $this->query('SELECT id FROM users WHERE id = ? AND role = ? AND status = 1', [$id, $role]); }

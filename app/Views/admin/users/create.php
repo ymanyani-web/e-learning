@@ -1,44 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Create User</title>
-    <style>
-        body{font-family:Arial,sans-serif;margin:40px;background:#f8fafc}
-        form{max-width:520px;background:white;padding:24px;border-radius:10px}
-        input,select,button{box-sizing:border-box;width:100%;padding:11px;margin:7px 0 15px}
-        .error{background:#fee2e2;padding:10px;margin-bottom:12px}
-    </style>
-</head>
-<body>
-<p><a href="<?= htmlspecialchars(\App\Core\Request::basePath() . '/admin/users') ?>">← Users</a></p>
-<h1>Create User</h1>
+<?php $title = 'Create person | LearnSpace'; require dirname(__DIR__, 2) . '/portal/_header.php'; ?>
+<section class="hero">
+    <div><a class="muted" href="/admin/users">← People</a><h1>Create an account</h1><p class="muted">Add a student, professor, or another administrator.</p></div>
+</section>
 
-<?php if (!empty($error)): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
-
-<form method="post" action="<?= htmlspecialchars(\App\Core\Request::basePath() . '/admin/users') ?>">
-    <?= \App\Core\Csrf::field() ?>
-    <label>First name</label>
-    <input type="text" name="first_name" required>
-
-    <label>Last name</label>
-    <input type="text" name="last_name" required>
-
-    <label>Email</label>
-    <input type="email" name="email" required>
-
-    <label>Password</label>
-    <input type="password" name="password" minlength="8" required>
-
-    <label>Role</label>
-    <select name="role">
-        <option value="STUDENT">Student</option>
-        <option value="TEACHER">Teacher</option>
-        <option value="ADMIN">Admin</option>
-    </select>
-
-    <button type="submit">Create user</button>
-</form>
-</body>
-</html>
+<section class="card" style="max-width:620px">
+    <form method="post" action="/admin/users">
+        <?= \App\Core\Csrf::field() ?>
+        <label>First name <input type="text" name="first_name" required autocomplete="given-name"></label>
+        <label>Last name <input type="text" name="last_name" required autocomplete="family-name"></label>
+        <label>Email <input type="email" name="email" required autocomplete="email"></label>
+        <label>Temporary password <input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+        <label>Role
+            <select name="role">
+                <option value="STUDENT" <?= $selectedRole === 'STUDENT' ? 'selected' : '' ?>>Student</option>
+                <option value="TEACHER" <?= $selectedRole === 'TEACHER' ? 'selected' : '' ?>>Professor</option>
+                <option value="ADMIN" <?= $selectedRole === 'ADMIN' ? 'selected' : '' ?>>Administrator</option>
+            </select>
+        </label>
+        <button type="submit">Create account</button>
+    </form>
+</section>
+<?php require dirname(__DIR__, 2) . '/portal/_footer.php'; ?>

@@ -26,6 +26,7 @@ class UserController
 
         View::render('admin/users/index', [
             'users' => $this->users->findAll(),
+            'user' => Auth::user(),
             'success' => Session::consumeFlash('success'),
             'error' => Session::consumeFlash('error'),
         ]);
@@ -36,6 +37,8 @@ class UserController
         Auth::requireRole('ADMIN');
 
         View::render('admin/users/create', [
+            'user' => Auth::user(),
+            'selectedRole' => in_array(strtoupper((string) Request::input('role', 'STUDENT')), ['ADMIN', 'TEACHER', 'STUDENT'], true) ? strtoupper((string) Request::input('role', 'STUDENT')) : 'STUDENT',
             'error' => Session::consumeFlash('error'),
         ]);
     }
