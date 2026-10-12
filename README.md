@@ -36,6 +36,21 @@ Native PHP and MySQL e-learning application with three roles:
    AI_MODEL=gpt-4o-mini
    ```
 
+   On Hostinger shared hosting, create `config/app.local.php` from
+   `config/app.local.php.example`, then add your OpenAI project key there. This
+   file is outside `public/`, is ignored by Git, and must never be uploaded to
+   GitHub:
+
+   ```php
+   return [
+       'ai' => [
+           'api_key' => 'your-openai-project-key',
+           'api_url' => 'https://api.openai.com/v1/chat/completions',
+           'model' => 'gpt-4o-mini',
+       ],
+   ];
+   ```
+
 3. Serve the `public` directory as the web root. For local development:
 
    ```sh

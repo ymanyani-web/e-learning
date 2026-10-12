@@ -34,8 +34,8 @@ class AiService
             "Create {$count} accurate multiple-choice questions about \"{$topic}\" for an educational exam. "
             . 'Return only valid JSON: an array of objects with keys "question", "options" (exactly four short strings), and "correct" (0-3).'
         );
-        $questions = json_decode($response, true);
-        if (!is_array($questions)) {
+        $questions = $this->jsonCollection($response, 'questions');
+        if ($questions === []) {
             throw new RuntimeException('The AI response was not valid question data. Try again.');
         }
         foreach ($questions as $question) {
@@ -47,11 +47,33 @@ class AiService
         return $questions;
     }
 
+    public function generateCourseSlides(string $subject, string $brief, int $count): array
+    {
+        $count = max(1, min($count, 12));
+        $response = $this->complete(
+            "Create a {$count}-slide course outline for the subject \"{$subject}\". Teacher requirements: \"{$brief}\". "
+            . 'Return only JSON, without Markdown code fences: {"slides":[{"title":"...","content":"..."}]}. '
+            . 'Content must use only simple HTML tags from p, strong, em, ul, ol, li, h2, h3, and blockquote. '
+            . 'Make each slide concise, accurate, and suitable for learners.'
+        );
+        $slides = $this->jsonCollection($response, 'slides');
+        if ($slides === []) {
+            throw new RuntimeException('The AI response was not valid slide data. Try again.');
+        }
+        foreach ($slides as $slide) {
+            if (!is_array($slide) || !is_string($slide['title'] ?? null) || !is_string($slide['content'] ?? null) || trim($slide['title']) === '' || trim($slide['content']) === '') {
+                throw new RuntimeException('The AI response contained an invalid slide. Try again.');
+            }
+        }
+        return $slides;
+    }
+
     private function complete(string $prompt): string
     {
-        $apiKey = $_ENV['AI_API_KEY'] ?? getenv('AI_API_KEY') ?: '';
-        $endpoint = $_ENV['AI_API_URL'] ?? getenv('AI_API_URL') ?: 'https://api.openai.com/v1/chat/completions';
-        $model = $_ENV['AI_MODEL'] ?? getenv('AI_MODEL') ?: 'gpt-4o-mini';
+        $config = $this->localConfig();
+        $apiKey = $_ENV['AI_API_KEY'] ?? getenv('AI_API_KEY') ?: ($config['api_key'] ?? '');
+        $endpoint = $_ENV['AI_API_URL'] ?? getenv('AI_API_URL') ?: ($config['api_url'] ?? 'https://api.openai.com/v1/chat/completions');
+        $model = $_ENV['AI_MODEL'] ?? getenv('AI_MODEL') ?: ($config['model'] ?? 'gpt-4o-mini');
 
         if ($apiKey === '') {
             throw new RuntimeException('AI is not configured. Set AI_API_KEY before using AI generation or learning help.');
@@ -96,5 +118,35 @@ class AiService
         }
 
         return trim($content);
+    }
+
+    private function localConfig(): array
+    {
+        $path = dirname(__DIR__, 2) . '/config/app.local.php';
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $config = require $path;
+        return is_array($config) && is_array($config['ai'] ?? null) ? $config['ai'] : [];
+    }
+
+    private function jsonCollection(string $response, string $key): array
+    {
+        $json = trim($response);
+        if (preg_match('/^```(?:json)?\s*(.*?)\s*```$/is', $json, $matches) === 1) {
+            $json = $matches[1];
+        }
+
+        $decoded = json_decode($json, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        if (array_is_list($decoded)) {
+            return $decoded;
+        }
+
+        return is_array($decoded[$key] ?? null) ? $decoded[$key] : [];
     }
 }

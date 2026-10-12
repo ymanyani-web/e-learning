@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Core\Auth;
 use App\Core\Csrf;
+use App\Core\ContentSanitizer;
 use App\Core\Database;
 use App\Core\Request;
 use App\Core\Response;
@@ -137,14 +138,17 @@ class LearningController
         $course = $this->teacherCourse((int) Request::input('id'));
         $chapters = $this->query('SELECT * FROM course_chapters WHERE course_id = ? ORDER BY position, id', [$course['id']]);
         $exams = $this->query('SELECT * FROM exams WHERE course_id = ? ORDER BY id DESC', [$course['id']]);
-        View::render('portal/course-editor', compact('course', 'chapters', 'exams') + ['message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
+        $resources = $this->query('SELECT r.*, ch.title AS chapter_title FROM course_resources r JOIN course_chapters ch ON ch.id = r.chapter_id WHERE ch.course_id = ? ORDER BY r.created_at DESC', [$course['id']]);
+        $pendingTextAnswers = (int) $this->query('SELECT COUNT(*) AS count FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exams e ON e.id = q.exam_id WHERE e.course_id = ? AND q.type = "TEXT" AND a.points_awarded IS NULL', [$course['id']])[0]['count'];
+        $pendingTextExamId = $this->query('SELECT e.id FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exams e ON e.id = q.exam_id WHERE e.course_id = ? AND q.type = "TEXT" AND a.points_awarded IS NULL ORDER BY a.id DESC LIMIT 1', [$course['id']])[0]['id'] ?? null;
+        View::render('portal/course-editor', compact('course', 'chapters', 'exams', 'resources', 'pendingTextAnswers', 'pendingTextExamId') + ['message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
     }
 
     public function saveChapter(): void
     {
         Auth::requireRole('TEACHER'); Csrf::validate();
         $course = $this->teacherCourse((int) Request::input('course_id'));
-        $content = $this->text('content');
+        $content = trim((string) Request::input('content', ''));
         if (Request::input('generate_ai') === '1') {
             try {
                 $content = (new AiService())->generateLesson($course['subject_name'], $this->required('title'), $content);
@@ -152,11 +156,36 @@ class LearningController
                 $this->error('/teacher/course?id=' . $course['id'], $e->getMessage());
             }
         }
-        if ($content === '') $this->error('/teacher/course?id=' . $course['id'], 'Lesson content is required.');
+        $content = ContentSanitizer::sanitize($content);
+        if ($content === '') $this->error('/teacher/course?id=' . $course['id'], 'Slide content is required.');
         $position = (int) $this->pdo->query('SELECT COALESCE(MAX(position), 0) + 1 FROM course_chapters WHERE course_id = ' . (int) $course['id'])->fetchColumn();
         $status = Request::input('status') === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT';
         $this->pdo->prepare('INSERT INTO course_chapters (course_id, title, content, position, status) VALUES (?, ?, ?, ?, ?)')->execute([$course['id'], $this->required('title'), $content, $position, $status]);
+        $chapterId = (int) $this->pdo->lastInsertId();
+        $media = $this->uploadSlideMedia();
+        if ($media !== null) {
+            $this->pdo->prepare('INSERT INTO course_resources (chapter_id, title, type, file_path) VALUES (?, ?, ?, ?)')
+                ->execute([$chapterId, $media['name'], $media['type'], $media['path']]);
+        }
         $this->success('/teacher/course?id=' . $course['id'], 'Chapter saved.');
+    }
+
+    public function generateCourseSlides(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $course = $this->teacherCourse((int) Request::input('course_id'));
+        try {
+            $slides = (new AiService())->generateCourseSlides($course['subject_name'], $this->required('brief'), (int) Request::input('count', 5));
+        } catch (RuntimeException $e) {
+            $this->error('/teacher/course?id=' . $course['id'], $e->getMessage());
+        }
+
+        $position = (int) $this->pdo->query('SELECT COALESCE(MAX(position), 0) FROM course_chapters WHERE course_id = ' . (int) $course['id'])->fetchColumn();
+        $statement = $this->pdo->prepare('INSERT INTO course_chapters (course_id, title, content, position, status) VALUES (?, ?, ?, ?, "DRAFT")');
+        foreach ($slides as $slide) {
+            $statement->execute([$course['id'], $slide['title'], ContentSanitizer::sanitize($slide['content']), ++$position]);
+        }
+        $this->success('/teacher/course?id=' . $course['id'], 'AI created draft slides. Review and publish each slide.');
     }
 
     public function createExam(): void
@@ -164,8 +193,10 @@ class LearningController
         Auth::requireRole('TEACHER'); Csrf::validate();
         $course = $this->teacherCourse((int) Request::input('course_id'));
         $status = Request::input('status') === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT';
-        $this->pdo->prepare('INSERT INTO exams (course_id, title, description, duration_minutes, total_points, max_attempts, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            ->execute([$course['id'], $this->required('title'), $this->text('description'), max(1, (int) Request::input('duration_minutes', 30)), max(1, (float) Request::input('total_points', 20)), max(1, (int) Request::input('max_attempts', 1)), $status]);
+        $totalPoints = max(1, (float) Request::input('total_points', 20));
+        $passingScore = max(0, min($totalPoints, (float) Request::input('passing_score', 0)));
+        $this->pdo->prepare('INSERT INTO exams (course_id, title, description, duration_minutes, total_points, passing_score, max_attempts, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$course['id'], $this->required('title'), $this->text('description'), max(1, (int) Request::input('duration_minutes', 30)), $totalPoints, $passingScore, max(1, (int) Request::input('max_attempts', 1)), $status]);
         $this->success('/teacher/course?id=' . $course['id'], 'Exam created. Add questions below.');
     }
 
@@ -174,22 +205,51 @@ class LearningController
         Auth::requireRole('TEACHER'); Csrf::validate();
         $exam = $this->teacherExam((int) Request::input('exam_id'));
         $question = $this->required('question');
+        $questionType = (string) Request::input('question_type', 'RADIO');
+        if (!in_array($questionType, ['RADIO', 'CHECKBOX', 'TEXT'], true)) {
+            $this->error('/teacher/course?id=' . $exam['course_id'], 'Choose a valid answer type.');
+        }
         $options = array_values(array_filter(array_map('trim', (array) ($_POST['options'] ?? [])), fn($value) => $value !== ''));
-        $correct = (int) Request::input('correct_option', -1);
-        if (count($options) < 2 || !isset($options[$correct])) $this->error('/teacher/course?id=' . $exam['course_id'], 'Provide at least two options and select the correct one.');
+        $correct = array_values(array_unique(array_map('intval', (array) ($_POST['correct_options'] ?? []))));
+        if ($questionType !== 'TEXT' && (count($options) < 2 || $correct === [] || ($questionType === 'RADIO' && count($correct) !== 1) || array_filter($correct, fn(int $index): bool => !isset($options[$index])))) {
+            $this->error('/teacher/course?id=' . $exam['course_id'], 'Add at least two options and select the valid correct answer or answers.');
+        }
         $position = (int) $this->pdo->query('SELECT COALESCE(MAX(position), 0) + 1 FROM exam_questions WHERE exam_id = ' . (int) $exam['id'])->fetchColumn();
         $this->pdo->beginTransaction();
         try {
-            $this->pdo->prepare('INSERT INTO exam_questions (exam_id, question, type, points, position) VALUES (?, ?, "MULTIPLE_CHOICE", ?, ?)')->execute([$exam['id'], $question, max(0.5, (float) Request::input('points', 1)), $position]);
+            $this->pdo->prepare('INSERT INTO exam_questions (exam_id, question, type, allow_multiple, points, position) VALUES (?, ?, ?, ?, ?, ?)')
+                ->execute([$exam['id'], $question, $questionType === 'TEXT' ? 'TEXT' : 'MULTIPLE_CHOICE', $questionType === 'CHECKBOX' ? 1 : 0, max(0.5, (float) Request::input('points', 1)), $position]);
             $questionId = (int) $this->pdo->lastInsertId();
             $insertOption = $this->pdo->prepare('INSERT INTO exam_options (question_id, option_text, is_correct) VALUES (?, ?, ?)');
-            foreach ($options as $index => $option) $insertOption->execute([$questionId, $option, $index === $correct ? 1 : 0]);
+            foreach ($options as $index => $option) $insertOption->execute([$questionId, $option, in_array($index, $correct, true) ? 1 : 0]);
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
             throw $e;
         }
         $this->success('/teacher/course?id=' . $exam['course_id'], 'Question added.');
+    }
+
+    public function gradeTextAnswer(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $answerId = (int) Request::input('answer_id');
+        $answer = $this->query('SELECT a.id, a.attempt_id, q.points, q.exam_id, e.course_id, at.status AS attempt_status FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exams e ON e.id = q.exam_id JOIN courses c ON c.id = e.course_id JOIN exam_attempts at ON at.id = a.attempt_id WHERE a.id = ? AND q.type = "TEXT" AND c.teacher_id = ?', [$answerId, Auth::id()])[0] ?? null;
+        if ($answer === null) {
+            Response::abort(404, 'Text answer not found.');
+        }
+        $points = (float) Request::input('points_awarded', -1);
+        if ($points < 0 || $points > (float) $answer['points']) {
+            $this->error('/teacher/exam/grading?id=' . $answer['exam_id'], 'Enter a valid mark for this answer.');
+        }
+        $this->pdo->prepare('UPDATE exam_answers SET points_awarded = ? WHERE id = ?')->execute([$points, $answerId]);
+        $remaining = (int) $this->query('SELECT COUNT(*) AS count FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id WHERE a.attempt_id = ? AND q.type = "TEXT" AND a.points_awarded IS NULL', [$answer['attempt_id']])[0]['count'];
+        if ($remaining === 0 && $answer['attempt_status'] !== 'GRADED') {
+            $score = (float) $this->query('SELECT COALESCE(SUM(points_awarded), 0) AS score FROM exam_answers WHERE attempt_id = ?', [$answer['attempt_id']])[0]['score'];
+            $this->pdo->prepare('UPDATE exam_attempts SET score = ?, status = "GRADED" WHERE id = ?')->execute([$score, $answer['attempt_id']]);
+            $this->pdo->prepare('INSERT INTO grades (student_id, course_id, type, reference_id, score, max_score) SELECT student_id, ?, "EXAM", ?, ?, total_points FROM exam_attempts JOIN exams ON exams.id = ? WHERE exam_attempts.id = ?')->execute([$answer['course_id'], $answer['exam_id'], $score, $answer['exam_id'], $answer['attempt_id']]);
+        }
+        $this->success('/teacher/exam/grading?id=' . $answer['exam_id'], 'Text answer marked.');
     }
 
     public function generateQuestions(): void
@@ -233,7 +293,9 @@ class LearningController
         $course = $this->studentCourse((int) Request::input('id'));
         $chapters = $this->query('SELECT * FROM course_chapters WHERE course_id = ? AND status = "PUBLISHED" ORDER BY position', [$course['id']]);
         $exams = $this->query('SELECT * FROM exams WHERE course_id = ? AND status = "PUBLISHED" ORDER BY id DESC', [$course['id']]);
-        View::render('portal/course-study', compact('course', 'chapters', 'exams') + ['answer' => Session::consumeFlash('ai_answer'), 'message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
+        $resources = $this->query('SELECT r.*, ch.title AS chapter_title FROM course_resources r JOIN course_chapters ch ON ch.id = r.chapter_id WHERE ch.course_id = ? AND ch.status = "PUBLISHED" ORDER BY r.created_at', [$course['id']]);
+        $completedChapters = array_column($this->query('SELECT chapter_id FROM course_chapter_progress WHERE student_id = ? AND completed_at IS NOT NULL', [Auth::id()]), 'chapter_id');
+        View::render('portal/course-study', compact('course', 'chapters', 'exams', 'resources', 'completedChapters') + ['answer' => Session::consumeFlash('ai_answer'), 'message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
     }
 
     public function askAi(): void
@@ -264,30 +326,81 @@ class LearningController
     {
         Auth::requireRole('STUDENT'); Csrf::validate();
         $exam = $this->studentExam((int) Request::input('exam_id'));
-        $questions = $this->query('SELECT q.id, q.points, o.id AS correct_option FROM exam_questions q LEFT JOIN exam_options o ON o.question_id = q.id AND o.is_correct = 1 WHERE q.exam_id = ?', [$exam['id']]);
+        $questions = $this->query('SELECT id, type, allow_multiple, points FROM exam_questions WHERE exam_id = ? ORDER BY position', [$exam['id']]);
         if ($questions === []) $this->error('/student/course?id=' . $exam['course_id'], 'This exam has no questions yet.');
         $attemptNumber = (int) $this->query('SELECT COUNT(*) AS count FROM exam_attempts WHERE exam_id = ? AND student_id = ?', [$exam['id'], Auth::id()])[0]['count'] + 1;
         if ($attemptNumber > (int) $exam['max_attempts']) $this->error('/student/course?id=' . $exam['course_id'], 'You have used all attempts for this exam.');
+        $hasTextAnswers = (bool) array_filter($questions, fn(array $question): bool => $question['type'] === 'TEXT');
         $this->pdo->beginTransaction();
         try {
-            $this->pdo->prepare('INSERT INTO exam_attempts (exam_id, student_id, attempt_number, started_at, submitted_at, score, status) VALUES (?, ?, ?, NOW(), NOW(), 0, "GRADED")')->execute([$exam['id'], Auth::id(), $attemptNumber]);
+            $this->pdo->prepare('INSERT INTO exam_attempts (exam_id, student_id, attempt_number, started_at, submitted_at, score, status) VALUES (?, ?, ?, NOW(), NOW(), ?, ?)')->execute([$exam['id'], Auth::id(), $attemptNumber, $hasTextAnswers ? null : 0, $hasTextAnswers ? 'SUBMITTED' : 'GRADED']);
             $attemptId = (int) $this->pdo->lastInsertId();
-            $score = 0.0; $answer = $this->pdo->prepare('INSERT INTO exam_answers (attempt_id, question_id, option_id, points_awarded) VALUES (?, ?, ?, ?)');
+            $score = 0.0;
+            $answer = $this->pdo->prepare('INSERT INTO exam_answers (attempt_id, question_id, option_id, selected_option_ids, text_answer, points_awarded) VALUES (?, ?, ?, ?, ?, ?)');
             foreach ($questions as $question) {
-                $choice = (int) ($_POST['answer'][$question['id']] ?? 0);
-                $points = $choice > 0 && $choice === (int) $question['correct_option'] ? (float) $question['points'] : 0;
-                $score += $points; $answer->execute([$attemptId, $question['id'], $choice ?: null, $points]);
+                if ($question['type'] === 'TEXT') {
+                    $textAnswer = trim((string) ($_POST['answer_text'][$question['id']] ?? ''));
+                    $answer->execute([$attemptId, $question['id'], null, null, $textAnswer, null]);
+                    continue;
+                }
+                $selected = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['answer'][$question['id']] ?? [])), fn(int $id): bool => $id > 0)));
+                $correct = array_map('intval', array_column($this->query('SELECT id FROM exam_options WHERE question_id = ? AND is_correct = 1', [$question['id']]), 'id'));
+                sort($selected);
+                sort($correct);
+                $points = $selected === $correct ? (float) $question['points'] : 0.0;
+                $score += $points;
+                $answer->execute([$attemptId, $question['id'], $selected[0] ?? null, json_encode($selected, JSON_THROW_ON_ERROR), null, $points]);
             }
-            $this->pdo->prepare('UPDATE exam_attempts SET score = ? WHERE id = ?')->execute([$score, $attemptId]);
-            $this->pdo->prepare('INSERT INTO grades (student_id, course_id, type, reference_id, score, max_score) VALUES (?, ?, "EXAM", ?, ?, ?)')->execute([Auth::id(), $exam['course_id'], $exam['id'], $score, $exam['total_points']]);
+            if (!$hasTextAnswers) {
+                $this->pdo->prepare('UPDATE exam_attempts SET score = ? WHERE id = ?')->execute([$score, $attemptId]);
+                $this->pdo->prepare('INSERT INTO grades (student_id, course_id, type, reference_id, score, max_score) VALUES (?, ?, "EXAM", ?, ?, ?)')->execute([Auth::id(), $exam['course_id'], $exam['id'], $score, $exam['total_points']]);
+            }
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack(); throw $e;
         }
-        $this->success('/student/course?id=' . $exam['course_id'], "Exam submitted. Score: {$score} / {$exam['total_points']}.");
+        if ($hasTextAnswers) {
+            $this->success('/student/course?id=' . $exam['course_id'], 'Exam submitted. Your professor will mark the text answers before the final result is available.');
+        }
+        $result = $score >= (float) $exam['passing_score'] ? 'Passed' : 'Not yet passed';
+        $this->success('/student/course?id=' . $exam['course_id'], "Exam submitted. Score: {$score} / {$exam['total_points']}. {$result}.");
     }
 
     private function usersByRole(string $role): array { return $this->query('SELECT id, first_name, last_name, email FROM users WHERE role = ? AND status = 1 ORDER BY last_name, first_name', [$role]); }
+    private function uploadSlideMedia(): ?array
+    {
+        $file = $_FILES['media'] ?? null;
+        if (!is_array($file) || (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+            return null;
+        }
+        if ((int) $file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file((string) $file['tmp_name'])) {
+            $this->error(Request::path(), 'The media upload failed. Try again.');
+        }
+        if ((int) $file['size'] > 25 * 1024 * 1024) {
+            $this->error(Request::path(), 'Images and videos must be 25 MB or smaller.');
+        }
+        $mime = (new \finfo(FILEINFO_MIME_TYPE))->file((string) $file['tmp_name']);
+        $allowed = [
+            'image/jpeg' => ['extension' => 'jpg', 'type' => 'IMAGE'],
+            'image/png' => ['extension' => 'png', 'type' => 'IMAGE'],
+            'image/webp' => ['extension' => 'webp', 'type' => 'IMAGE'],
+            'image/gif' => ['extension' => 'gif', 'type' => 'IMAGE'],
+            'video/mp4' => ['extension' => 'mp4', 'type' => 'VIDEO'],
+            'video/webm' => ['extension' => 'webm', 'type' => 'VIDEO'],
+        ];
+        if (!is_string($mime) || !isset($allowed[$mime])) {
+            $this->error(Request::path(), 'Upload a JPEG, PNG, WebP, GIF, MP4, or WebM file.');
+        }
+        $directory = dirname(__DIR__, 2) . '/public/uploads/course-media';
+        if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) {
+            throw new RuntimeException('The course media directory could not be created.');
+        }
+        $fileName = bin2hex(random_bytes(16)) . '.' . $allowed[$mime]['extension'];
+        if (!move_uploaded_file((string) $file['tmp_name'], $directory . '/' . $fileName)) {
+            throw new RuntimeException('The uploaded media could not be saved.');
+        }
+        return ['name' => basename((string) $file['name']), 'path' => 'uploads/course-media/' . $fileName, 'type' => $allowed[$mime]['type']];
+    }
     private function count(string $from): int { return (int) $this->pdo->query("SELECT COUNT(*) FROM {$from}")->fetchColumn(); }
     private function query(string $sql, array $parameters = []): array { $statement = $this->pdo->prepare($sql); $statement->execute($parameters); return $statement->fetchAll(); }
     private function exists(string $table, int $id): bool { return $id > 0 && (bool) $this->query("SELECT id FROM {$table} WHERE id = ?", [$id]); }

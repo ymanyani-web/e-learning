@@ -23,6 +23,7 @@ DROP TABLE IF EXISTS exams;
 DROP TABLE IF EXISTS assignment_submissions;
 DROP TABLE IF EXISTS assignments;
 DROP TABLE IF EXISTS course_resources;
+DROP TABLE IF EXISTS course_chapter_progress;
 DROP TABLE IF EXISTS course_chapters;
 DROP TABLE IF EXISTS courses;
 DROP TABLE IF EXISTS subjects;
@@ -205,6 +206,35 @@ CREATE INDEX idx_course_chapters_course ON course_chapters(course_id);
 CREATE INDEX idx_course_chapters_position ON course_chapters(course_id, position);
 
 -- =========================================================
+-- 6B. COURSE CHAPTER PROGRESS
+-- =========================================================
+
+CREATE TABLE course_chapter_progress (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    student_id INT UNSIGNED NOT NULL,
+    chapter_id INT UNSIGNED NOT NULL,
+    completed_at DATETIME NULL,
+    last_viewed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_chapter_progress_student
+        FOREIGN KEY (student_id)
+        REFERENCES users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_chapter_progress_chapter
+        FOREIGN KEY (chapter_id)
+        REFERENCES course_chapters(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    CONSTRAINT uq_chapter_progress_student_chapter
+        UNIQUE (student_id, chapter_id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_chapter_progress_student ON course_chapter_progress(student_id, last_viewed_at);
+
+-- =========================================================
 -- 7. COURSE RESOURCES
 -- =========================================================
 
@@ -306,6 +336,7 @@ CREATE TABLE exams (
     description LONGTEXT NULL,
     duration_minutes INT NOT NULL DEFAULT 60,
     total_points DECIMAL(7,2) NOT NULL DEFAULT 20.00,
+    passing_score DECIMAL(7,2) NOT NULL DEFAULT 0.00,
     max_attempts INT NOT NULL DEFAULT 1,
     start_at DATETIME NULL,
     end_at DATETIME NULL,
@@ -342,6 +373,7 @@ CREATE TABLE exam_questions (
     exam_id INT UNSIGNED NOT NULL,
     question LONGTEXT NOT NULL,
     type VARCHAR(30) NOT NULL DEFAULT 'MULTIPLE_CHOICE',
+    allow_multiple TINYINT(1) NOT NULL DEFAULT 0,
     points DECIMAL(7,2) NOT NULL DEFAULT 1.00,
     position INT NOT NULL DEFAULT 0,
 
@@ -432,6 +464,7 @@ CREATE TABLE exam_answers (
     attempt_id INT UNSIGNED NOT NULL,
     question_id INT UNSIGNED NOT NULL,
     option_id INT UNSIGNED NULL,
+    selected_option_ids JSON NULL,
     text_answer LONGTEXT NULL,
     points_awarded DECIMAL(7,2) NULL,
 
