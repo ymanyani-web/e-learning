@@ -42,6 +42,12 @@ class StudentController
         $this->render('courses', ['courses' => $this->studentCourses()]);
     }
 
+    public function calendar(): void
+    {
+        Auth::requireRole('STUDENT');
+        $this->render('calendar', ['calendarWeek' => $this->weeklyCalendar()]);
+    }
+
     public function exams(): void
     {
         Auth::requireRole('STUDENT');
@@ -114,6 +120,45 @@ class StudentController
             Response::abort(404, 'Course not found.');
         }
         return $course;
+    }
+
+    private function weeklyCalendar(): array
+    {
+        $weekStart = (new \DateTimeImmutable('monday this week'))->setTime(0, 0);
+        $weekEnd = $weekStart->modify('+7 days');
+        $scope = 'EXISTS (SELECT 1 FROM enrollments n WHERE n.class_id = c.class_id AND n.student_id = ? AND n.status = "ACTIVE")';
+        $events = [];
+        $slots = $this->query('SELECT css.id AS schedule_slot_id, css.weekday, css.start_time, css.end_time, c.id AS course_id, c.title AS course_title, c.start_date, c.end_date FROM course_schedule_slots css JOIN courses c ON c.id = css.course_id WHERE ' . $scope . ' AND c.status = "PUBLISHED"', [Auth::id()]);
+        $overrides = $this->query('SELECT cso.course_schedule_slot_id, cso.occurrence_date, cso.override_date, cso.start_time, cso.end_time FROM course_schedule_overrides cso JOIN course_schedule_slots css ON css.id = cso.course_schedule_slot_id JOIN courses c ON c.id = css.course_id WHERE ' . $scope . ' AND c.status = "PUBLISHED" AND cso.occurrence_date >= ? AND cso.occurrence_date < ?', [Auth::id(), $weekStart->format('Y-m-d'), $weekEnd->format('Y-m-d')]);
+        $changed = [];
+        foreach ($overrides as $override) {
+            $changed[$override['course_schedule_slot_id'] . ':' . $override['occurrence_date']] = $override;
+        }
+        for ($i = 0; $i < 7; $i++) {
+            $day = $weekStart->modify("+{$i} days");
+            $date = $day->format('Y-m-d');
+            foreach ($slots as $slot) {
+                $key = $slot['schedule_slot_id'] . ':' . $date;
+                if (strtoupper($day->format('l')) === $slot['weekday'] && $date >= $slot['start_date'] && $date <= $slot['end_date'] && !isset($changed[$key])) {
+                    $events[] = ['event_type' => 'COURSE', 'event_date' => $date, 'start_time' => $slot['start_time'], 'end_time' => $slot['end_time'], 'course_title' => $slot['course_title'], 'course_id' => $slot['course_id']];
+                }
+            }
+        }
+        foreach ($overrides as $override) {
+            foreach ($slots as $slot) {
+                if ((int) $slot['schedule_slot_id'] === (int) $override['course_schedule_slot_id']) {
+                    $events[] = ['event_type' => 'COURSE', 'event_date' => $override['override_date'], 'start_time' => $override['start_time'], 'end_time' => $override['end_time'], 'course_title' => $slot['course_title'], 'course_id' => $slot['course_id']];
+                    break;
+                }
+            }
+        }
+        $exams = $this->query('SELECT e.id AS exam_id, c.id AS course_id, DATE(e.start_at) AS event_date, TIME(e.start_at) AS start_time, TIME(e.end_at) AS end_time, e.title AS course_title FROM exams e JOIN courses c ON c.id = e.course_id WHERE ' . $scope . ' AND c.status = "PUBLISHED" AND e.status = "PUBLISHED" AND e.start_at >= ? AND e.start_at < ?', [Auth::id(), $weekStart->format('Y-m-d H:i:s'), $weekEnd->format('Y-m-d H:i:s')]);
+        foreach ($exams as $exam) {
+            $exam['event_type'] = 'EXAM';
+            $events[] = $exam;
+        }
+        usort($events, fn(array $left, array $right): int => strcmp($left['event_date'] . $left['start_time'], $right['event_date'] . $right['start_time']));
+        return $events;
     }
 
     private function render(string $section, array $data): void

@@ -78,6 +78,8 @@ $router->post('/teacher/inline-image', [LearningController::class, 'uploadInline
 $router->post('/teacher/courses/ai', [LearningController::class, 'generateCourseSlides']);
 $router->post('/teacher/exams', [LearningController::class, 'createExam']);
 $router->post('/teacher/questions', [LearningController::class, 'saveQuestion']);
+$router->post('/teacher/questions/update', [LearningController::class, 'updateQuestion']);
+$router->post('/teacher/questions/delete', [LearningController::class, 'deleteQuestion']);
 $router->post('/teacher/questions/ai', [LearningController::class, 'generateQuestions']);
 $router->post('/teacher/exam/answers/grade', [LearningController::class, 'gradeTextAnswer']);
 $router->post('/teacher/exam/marks', [TeacherController::class, 'saveManualMark']);
@@ -86,6 +88,7 @@ $router->post('/teacher/attendance/records', [TeacherController::class, 'updateA
 $router->post('/teacher/attendance/records/remove', [TeacherController::class, 'removeAttendanceRecord']);
 $router->get('/student', [StudentController::class, 'dashboard']);
 $router->get('/student/courses', [StudentController::class, 'courses']);
+$router->get('/student/calendar', [StudentController::class, 'calendar']);
 $router->get('/student/exams', [StudentController::class, 'exams']);
 $router->get('/student/course', [LearningController::class, 'courseStudy']);
 $router->post('/student/ask-ai', [LearningController::class, 'askAi']);

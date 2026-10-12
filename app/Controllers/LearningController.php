@@ -170,10 +170,32 @@ class LearningController
         $course = $this->teacherCourse((int) Request::input('id'));
         $chapters = $this->query('SELECT * FROM course_chapters WHERE course_id = ? ORDER BY position, id', [$course['id']]);
         $exams = $this->query('SELECT * FROM exams WHERE course_id = ? ORDER BY id DESC', [$course['id']]);
+        $questionsByExam = [];
+        foreach ($this->query('SELECT q.*, o.id AS option_id, o.option_text, o.is_correct FROM exam_questions q JOIN exams e ON e.id = q.exam_id LEFT JOIN exam_options o ON o.question_id = q.id WHERE e.course_id = ? ORDER BY q.exam_id, q.position, q.id, o.id', [$course['id']]) as $row) {
+            $questionId = (int) $row['id'];
+            if (!isset($questionsByExam[$row['exam_id']][$questionId])) {
+                $questionsByExam[$row['exam_id']][$questionId] = [
+                    'id' => $questionId,
+                    'question' => $row['question'],
+                    'type' => $row['type'],
+                    'allow_multiple' => $row['allow_multiple'],
+                    'points' => $row['points'],
+                    'position' => $row['position'],
+                    'options' => [],
+                ];
+            }
+            if ($row['option_id'] !== null) {
+                $questionsByExam[$row['exam_id']][$questionId]['options'][] = [
+                    'id' => (int) $row['option_id'],
+                    'option_text' => $row['option_text'],
+                    'is_correct' => (bool) $row['is_correct'],
+                ];
+            }
+        }
         $resources = $this->query('SELECT r.*, ch.title AS chapter_title FROM course_resources r JOIN course_chapters ch ON ch.id = r.chapter_id WHERE ch.course_id = ? ORDER BY r.created_at DESC', [$course['id']]);
         $pendingTextAnswers = (int) $this->query('SELECT COUNT(*) AS count FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exams e ON e.id = q.exam_id WHERE e.course_id = ? AND q.type = "TEXT" AND a.points_awarded IS NULL', [$course['id']])[0]['count'];
         $pendingTextExamId = $this->query('SELECT e.id FROM exam_answers a JOIN exam_questions q ON q.id = a.question_id JOIN exams e ON e.id = q.exam_id WHERE e.course_id = ? AND q.type = "TEXT" AND a.points_awarded IS NULL ORDER BY a.id DESC LIMIT 1', [$course['id']])[0]['id'] ?? null;
-        View::render('portal/course-editor', compact('course', 'chapters', 'exams', 'resources', 'pendingTextAnswers', 'pendingTextExamId') + ['message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
+        View::render('portal/course-editor', compact('course', 'chapters', 'exams', 'questionsByExam', 'resources', 'pendingTextAnswers', 'pendingTextExamId') + ['message' => Session::consumeFlash('success'), 'error' => Session::consumeFlash('error')]);
     }
 
     public function saveChapter(): void
@@ -283,16 +305,7 @@ class LearningController
     {
         Auth::requireRole('TEACHER'); Csrf::validate();
         $exam = $this->teacherExam((int) Request::input('exam_id'));
-        $question = $this->required('question');
-        $questionType = (string) Request::input('question_type', 'RADIO');
-        if (!in_array($questionType, ['RADIO', 'CHECKBOX', 'TEXT'], true)) {
-            $this->error('/teacher/course?id=' . $exam['course_id'], 'Choose a valid answer type.');
-        }
-        $options = array_values(array_filter(array_map('trim', (array) ($_POST['options'] ?? [])), fn($value) => $value !== ''));
-        $correct = array_values(array_unique(array_map('intval', (array) ($_POST['correct_options'] ?? []))));
-        if ($questionType !== 'TEXT' && (count($options) < 2 || $correct === [] || ($questionType === 'RADIO' && count($correct) !== 1) || array_filter($correct, fn(int $index): bool => !isset($options[$index])))) {
-            $this->error('/teacher/course?id=' . $exam['course_id'], 'Add at least two options and select the valid correct answer or answers.');
-        }
+        ['question' => $question, 'type' => $questionType, 'options' => $options, 'correct' => $correct] = $this->questionInput($exam['course_id']);
         $position = (int) $this->pdo->query('SELECT COALESCE(MAX(position), 0) + 1 FROM exam_questions WHERE exam_id = ' . (int) $exam['id'])->fetchColumn();
         $this->pdo->beginTransaction();
         try {
@@ -307,6 +320,44 @@ class LearningController
             throw $e;
         }
         $this->success('/teacher/course?id=' . $exam['course_id'], 'Question added.');
+    }
+
+    public function updateQuestion(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $questionRecord = $this->teacherQuestion((int) Request::input('question_id'));
+        if ((int) $this->query('SELECT COUNT(*) AS count FROM exam_answers WHERE question_id = ?', [$questionRecord['id']])[0]['count'] > 0) {
+            $this->error('/teacher/course?id=' . $questionRecord['course_id'], 'Questions with submitted answers cannot be changed.');
+        }
+        ['question' => $question, 'type' => $questionType, 'options' => $options, 'correct' => $correct] = $this->questionInput($questionRecord['course_id']);
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare('UPDATE exam_questions SET question = ?, type = ?, allow_multiple = ?, points = ? WHERE id = ?')
+                ->execute([$question, $questionType === 'TEXT' ? 'TEXT' : 'MULTIPLE_CHOICE', $questionType === 'CHECKBOX' ? 1 : 0, max(0.5, (float) Request::input('points', 1)), $questionRecord['id']]);
+            $this->pdo->prepare('DELETE FROM exam_options WHERE question_id = ?')->execute([$questionRecord['id']]);
+            if ($questionType !== 'TEXT') {
+                $insertOption = $this->pdo->prepare('INSERT INTO exam_options (question_id, option_text, is_correct) VALUES (?, ?, ?)');
+                foreach ($options as $index => $option) {
+                    $insertOption->execute([$questionRecord['id'], $option, in_array($index, $correct, true) ? 1 : 0]);
+                }
+            }
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        $this->success('/teacher/course?id=' . $questionRecord['course_id'], 'Question updated.');
+    }
+
+    public function deleteQuestion(): void
+    {
+        Auth::requireRole('TEACHER'); Csrf::validate();
+        $question = $this->teacherQuestion((int) Request::input('question_id'));
+        if ((int) $this->query('SELECT COUNT(*) AS count FROM exam_answers WHERE question_id = ?', [$question['id']])[0]['count'] > 0) {
+            $this->error('/teacher/course?id=' . $question['course_id'], 'Questions with submitted answers cannot be deleted.');
+        }
+        $this->pdo->prepare('DELETE FROM exam_questions WHERE id = ?')->execute([$question['id']]);
+        $this->success('/teacher/course?id=' . $question['course_id'], 'Question deleted.');
     }
 
     public function gradeTextAnswer(): void
@@ -505,6 +556,34 @@ class LearningController
         return $slots;
     }
     private function usersByRole(string $role): array { return $this->query('SELECT id, first_name, last_name, email FROM users WHERE role = ? AND status = 1 ORDER BY last_name, first_name', [$role]); }
+    private function questionInput(int $courseId): array
+    {
+        $question = $this->required('question');
+        $type = (string) Request::input('question_type', 'RADIO');
+        if (!in_array($type, ['RADIO', 'CHECKBOX', 'TEXT'], true)) {
+            $this->error('/teacher/course?id=' . $courseId, 'Choose a valid answer type.');
+        }
+        if ($type === 'TEXT') {
+            return compact('question', 'type') + ['options' => [], 'correct' => []];
+        }
+
+        $options = [];
+        foreach ((array) ($_POST['options'] ?? []) as $index => $option) {
+            $option = trim((string) $option);
+            if ($option !== '') $options[$index] = $option;
+        }
+        $correct = [];
+        foreach ((array) ($_POST['correct_options'] ?? []) as $index) {
+            if (is_scalar($index) && ctype_digit((string) $index) && isset($options[(int) $index])) {
+                $correct[] = (int) $index;
+            }
+        }
+        $correct = array_values(array_unique($correct));
+        if (count($options) < 2 || $correct === [] || ($type === 'RADIO' && count($correct) !== 1)) {
+            $this->error('/teacher/course?id=' . $courseId, 'Add at least two options and select the valid correct answer or answers.');
+        }
+        return compact('question', 'type', 'options', 'correct');
+    }
     private function uploadSlideMedia(string $field = 'media', bool $imagesOnly = false): ?array
     {
         $file = $_FILES[$field] ?? null;
@@ -550,6 +629,7 @@ class LearningController
     private function text(string $key): string { return trim((string) Request::input($key, '')); }
     private function teacherCourse(int $id): array { $course = $this->query('SELECT c.*, s.name AS subject_name FROM courses c JOIN subjects s ON s.id = c.subject_id WHERE c.id = ? AND c.teacher_id = ?', [$id, Auth::id()])[0] ?? null; if ($course === null) Response::abort(404, 'Course not found.'); return $course; }
     private function teacherExam(int $id): array { $exam = $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id WHERE e.id = ? AND c.teacher_id = ?', [$id, Auth::id()])[0] ?? null; if ($exam === null) Response::abort(404, 'Exam not found.'); return $exam; }
+    private function teacherQuestion(int $id): array { $question = $this->query('SELECT q.*, e.course_id FROM exam_questions q JOIN exams e ON e.id = q.exam_id JOIN courses c ON c.id = e.course_id WHERE q.id = ? AND c.teacher_id = ?', [$id, Auth::id()])[0] ?? null; if ($question === null) Response::abort(404, 'Question not found.'); return $question; }
     private function studentCourse(int $id): array { $course = $this->query('SELECT c.*, s.name AS subject_name FROM courses c JOIN subjects s ON s.id = c.subject_id JOIN enrollments e ON e.class_id = c.class_id AND e.student_id = ? AND e.status = "ACTIVE" WHERE c.id = ? AND c.status = "PUBLISHED"', [Auth::id(), $id])[0] ?? null; if ($course === null) Response::abort(404, 'Course not found.'); return $course; }
     private function studentExam(int $id): array { $exam = $this->query('SELECT e.* FROM exams e JOIN courses c ON c.id = e.course_id JOIN enrollments n ON n.class_id = c.class_id AND n.student_id = ? AND n.status = "ACTIVE" WHERE e.id = ? AND e.delivery_mode = "ONLINE" AND e.status = "PUBLISHED" AND c.status = "PUBLISHED" AND e.start_at <= NOW() AND e.end_at >= NOW()', [Auth::id(), $id])[0] ?? null; if ($exam === null) Response::abort(404, 'Exam is not available at this time.'); return $exam; }
     private function success(string $path, string $message): never { Session::flash('success', $message); Response::redirect($path); }
